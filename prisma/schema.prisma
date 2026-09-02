@@ -1,0 +1,639 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../generated/panel"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ================================================================
+// ENUMS
+// ================================================================
+
+enum UserType {
+  SUPER_ADMIN
+  PROJECT_MANAGER
+  ULB_ADMIN
+  ULB_USER
+}
+
+enum ActionType {
+  VIEW
+  ADD
+  EDIT
+  DELETE
+  PAYMENT
+  APPROVE
+  REJECT
+  EXPORT
+  PRINT
+  VERIFY
+}
+
+enum PermissionEffect {
+  GRANT
+  REVOKE
+}
+
+enum AbacAttribute {
+  TIME_RANGE
+  IP_WHITELIST
+  ZONE_RESTRICT
+  WARD_RESTRICT
+  DATE_RANGE
+  DEVICE_TYPE
+}
+
+enum AuditAction {
+  GRANTED
+  REVOKED
+  DENIED
+  OVERRIDE_GRANT
+  OVERRIDE_REVOKE
+}
+
+enum PlatformType {
+  WEB
+  MOBILE
+  ALL
+}
+
+// ================================================================
+// GLOBAL LAYER
+// ================================================================
+
+model user {
+  id         Int       @id @default(autoincrement())
+  username   String    @unique
+  email      String?   @unique
+  phone      String    @unique
+  password   String
+  user_type  UserType  @default(ULB_USER)
+  is_active  Boolean   @default(true)
+  version    Int       @default(0)
+  created_at DateTime  @default(now())
+  updated_at DateTime  @default(now()) @updatedAt
+  deleted_at DateTime?
+
+  // Relations - Enterprise Layer
+  ulb_mappings      ulb_user_mapping[]
+  zone_ward_scopes  user_zone_ward_mapping[]
+  session_contexts  user_session_context[]
+  permission_grants user_permission[]        @relation("GrantedToUser")
+  permission_audits permission_audit_log[]   @relation("AuditUser")
+  abac_policies     user_abac_policy[]
+  refresh_tokens    refresh_token[]
+
+  // Legacy Relations (Updated)
+  employee           employee?
+  userNotification   notifications[]
+  loginAttempts      tbl_login_attempts[]
+  otpLogin           tbl_otp_login[]
+  tbl_property_block tbl_property_block[]
+}
+
+// Refresh Token — for persistent sessions and logout/revocation
+model refresh_token {
+  id         Int      @id @default(autoincrement())
+  token      String   @unique
+  user_id    Int
+  ulb_id     Int? // Which ULB context this token is for
+  is_revoked Boolean  @default(false)
+  expires_at DateTime
+  created_at DateTime @default(now())
+
+  user user @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@index([token])
+  @@index([user_id])
+}
+
+// Global ULB entity
+model ulb_master {
+  id                Int       @id @default(autoincrement())
+  ulb_type_id       Int
+  name              String
+  name_hindi        String?
+  labels            Json? // For multi-language support { "en": "...", "hi": "..." }
+  address           String?
+  domainname        String?   @unique
+  gstno             String?
+  nigamtollfreeno   String?
+  receipttollfreeno String?
+  bankname          String?
+  accountno         String?
+  ifsccode          String?
+  municipallogo     String?
+  agencyfullname    String?
+  agencylogo        String?
+  payee_id          String?
+  latitude          String?
+  longitude         String?
+  is_active         Boolean   @default(true)
+  version           Int       @default(0)
+  recstatus         Int       @default(1)
+  created_at        DateTime  @default(now())
+  updated_at        DateTime  @default(now()) @updatedAt
+  deleted_at        DateTime?
+
+  ulb_type        ulb_type               @relation(fields: [ulb_type_id], references: [id])
+  zones           zone_master[]
+  user_mappings   ulb_user_mapping[]
+  roles           role[]
+  module_mappings ulb_module_mapping[]
+  agencies        agency[]
+  notifications   notifications[]
+  property_blocks tbl_property_block[]
+  audit_logs      permission_audit_log[]
+}
+
+model ulb_type {
+  id         Int          @id @default(autoincrement())
+  name       String       @unique
+  recstatus  Int          @default(1)
+  created_at DateTime     @default(now())
+  updated_at DateTime     @default(now()) @updatedAt
+  ulbs       ulb_master[]
+}
+
+// Global module catalog — property, swm, water, shop, trade...
+model module {
+  id          Int          @id @default(autoincrement())
+  code        String       @unique // "property", "swm", "water", "trade"
+  label       String       // "Property Tax", "Solid Waste Mgmt"
+  description String?
+  icon        String?
+  order       Int          @default(0)
+  platform    PlatformType @default(WEB) // WEB | MOBILE | ALL
+  is_active   Boolean      @default(true)
+  version     Int          @default(0)
+  created_at  DateTime     @default(now())
+  updated_at  DateTime     @default(now()) @updatedAt
+  deleted_at  DateTime?
+
+  ulb_mappings ulb_module_mapping[]
+  menus        menu[]
+  employee     employee[]
+}
+
+// Global menu — belongs to module, hierarchical
+model menu {
+  id         Int          @id @default(autoincrement())
+  module_id  Int
+  label      String
+  path       String?
+  icon       String?
+  parentId   Int?
+  order      Int          @default(0)
+  platform   PlatformType @default(WEB) // WEB | MOBILE | ALL — controls where this menu appears
+  is_active  Boolean      @default(true)
+  version    Int          @default(0)
+  created_at DateTime     @default(now())
+  updated_at DateTime     @default(now()) @updatedAt
+  deleted_at DateTime?
+
+  module   module        @relation(fields: [module_id], references: [id])
+  parent   menu?         @relation("MenuHierarchy", fields: [parentId], references: [id])
+  children menu[]        @relation("MenuHierarchy")
+  actions  menu_action[]
+}
+
+// Every possible action on a menu — global definition
+model menu_action {
+  id         Int        @id @default(autoincrement())
+  menu_id    Int
+  action     ActionType
+  label      String // "View Property List", "Add New Property"
+  is_active  Boolean    @default(true)
+  created_at DateTime   @default(now())
+
+  menu             menu                   @relation(fields: [menu_id], references: [id])
+  role_grants      role_menu_action[]
+  user_permissions user_permission[]
+  audit_logs       permission_audit_log[]
+
+  @@unique([menu_id, action])
+}
+
+// ================================================================
+// ULB WORKSPACE LAYER — completely isolated per ULB
+// ================================================================
+
+// Which modules are enabled for which ULB
+model ulb_module_mapping {
+  id         Int      @id @default(autoincrement())
+  ulb_id     Int
+  module_id  Int
+  is_active  Boolean  @default(true)
+  version    Int      @default(0)
+  created_at DateTime @default(now())
+  updated_at DateTime @default(now()) @updatedAt
+
+  ulb    ulb_master @relation(fields: [ulb_id], references: [id])
+  module module     @relation(fields: [module_id], references: [id])
+
+  @@unique([ulb_id, module_id])
+  @@index([ulb_id])
+}
+
+// Zones — scoped to ULB
+model zone_master {
+  id                   Int       @id @default(autoincrement())
+  ulb_id               Int
+  name                 String
+  zone_address         String?
+  zone_commissioner    String?
+  commissioner_contact String?
+  tollFree_No          String?
+  zonecode             String?
+  latitude             String?
+  longitude            String?
+  is_active            Boolean   @default(true)
+  version              Int       @default(0)
+  recstatus            Int       @default(1)
+  created_at           DateTime  @default(now())
+  updated_at           DateTime  @default(now()) @updatedAt
+  deleted_at           DateTime?
+
+  ulb           ulb_master               @relation(fields: [ulb_id], references: [id])
+  wards         ward_master[]
+  user_mappings ulb_user_mapping[]
+  zone_scopes   user_zone_ward_mapping[] @relation("ZoneUserScope")
+
+  @@unique([ulb_id, zonecode])
+  @@index([ulb_id])
+}
+
+// Wards — scoped to zone + ULB (Hardened with composite keys)
+model ward_master {
+  id         Int       @id @default(autoincrement())
+  zone_id    Int
+  ulb_id     Int 
+  ward_no    String
+  name       String?
+  ward_code  String?
+  area       String?
+  is_active  Boolean   @default(true)
+  version    Int       @default(0)
+  recstatus  Int       @default(1)
+  created_at DateTime  @default(now())
+  updated_at DateTime  @default(now()) @updatedAt
+  deleted_at DateTime?
+
+  // HARDENED RELATION: Ensures ward belongs to a zone in the CORRECT ULB
+  zone          zone_master              @relation(fields: [zone_id], references: [id])
+  user_mappings ulb_user_mapping[]
+  ward_scopes   user_zone_ward_mapping[] @relation("WardUserScope")
+
+  @@unique([ulb_id, ward_no])
+  @@index([ulb_id])
+  @@index([zone_id])
+}
+
+// Role — scoped to ULB
+model role {
+  id          Int       @id @default(autoincrement())
+  ulb_id      Int
+  name        String
+  description String?
+  is_active   Boolean   @default(true)
+  version     Int       @default(0)
+  recstatus   Int       @default(1)
+  created_at  DateTime  @default(now())
+  updated_at  DateTime  @default(now()) @updatedAt
+  deleted_at  DateTime?
+
+  ulb               ulb_master         @relation(fields: [ulb_id], references: [id])
+  user_mappings     ulb_user_mapping[]
+  role_menu_actions role_menu_action[]
+
+  @@unique([ulb_id, name])
+  @@index([ulb_id])
+}
+
+// RBAC base — what actions a role can perform
+model role_menu_action {
+  id             Int      @id @default(autoincrement())
+  role_id        Int
+  menu_action_id Int
+  ulb_id         Int // denormalized for fast lookup + future RLS
+  is_active      Boolean  @default(true)
+  created_by     Int? // super_admin or ulb_admin user_id
+  created_at     DateTime @default(now())
+  updated_at     DateTime @default(now()) @updatedAt
+
+  role        role        @relation(fields: [role_id], references: [id])
+  menu_action menu_action @relation(fields: [menu_action_id], references: [id])
+
+  @@unique([role_id, menu_action_id])
+  @@index([ulb_id])
+  @@index([role_id])
+}
+
+// ================================================================
+// USER ↔ ULB MAPPING — the core access bridge
+// A user can be mapped to multiple ULBs, each with own role+scope
+// ================================================================
+
+model ulb_user_mapping {
+  id          Int      @id @default(autoincrement())
+  user_id     Int
+  ulb_id      Int
+  role_id     Int
+  // Legacy single scope — kept for backward compat; use user_zone_ward_mapping for multi-zone
+  zone_id     Int?
+  ward_id     Int?
+  is_active   Boolean  @default(true)
+  assigned_by Int?
+  created_at  DateTime @default(now())
+  updated_at  DateTime @default(now()) @updatedAt
+
+  user user         @relation(fields: [user_id], references: [id])
+  ulb  ulb_master   @relation(fields: [ulb_id], references: [id])
+  role role         @relation(fields: [role_id], references: [id])
+  zone zone_master? @relation(fields: [zone_id], references: [id])
+  ward ward_master? @relation(fields: [ward_id], references: [id])
+
+  // one role per user per ULB
+  @@unique([user_id, ulb_id])
+  @@index([ulb_id])
+  @@index([user_id])
+}
+
+// ================================================================
+// GEOGRAPHIC SCOPE — multi-zone × multi-ward per user per ULB
+// Replaces single zone_id/ward_id for granular geographic access
+// ================================================================
+
+model user_zone_ward_mapping {
+  id          Int      @id @default(autoincrement())
+  user_id     Int
+  ulb_id      Int
+  zone_id     Int
+  ward_id     Int? // null = entire zone access; set = specific ward only
+  is_active   Boolean  @default(true)
+  assigned_by Int?
+  created_at  DateTime @default(now())
+  updated_at  DateTime @default(now()) @updatedAt
+
+  user user         @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  zone zone_master  @relation("ZoneUserScope", fields: [zone_id], references: [id])
+  ward ward_master? @relation("WardUserScope", fields: [ward_id], references: [id])
+
+  // A user can have multiple zone+ward combos per ULB
+  @@unique([user_id, ulb_id, zone_id, ward_id])
+  @@index([user_id, ulb_id])
+  @@index([zone_id])
+}
+
+// ================================================================
+// OVERRIDE LAYER — user-level grant/revoke on top of RBAC
+// ================================================================
+
+// Explicit per-user permission override (GRANT or REVOKE a specific action)
+model user_permission {
+  id             Int              @id @default(autoincrement())
+  user_id        Int
+  ulb_id         Int // which ULB this override applies to
+  menu_action_id Int
+  effect         PermissionEffect // GRANT or REVOKE
+  reason         String? // why this was granted/revoked
+  valid_from     DateTime? // time-boxed grants
+  valid_until    DateTime?
+  is_active      Boolean          @default(true)
+  granted_by     Int // admin who set this
+  created_at     DateTime         @default(now())
+  updated_at     DateTime         @default(now()) @updatedAt
+
+  user        user        @relation("GrantedToUser", fields: [user_id], references: [id])
+  menu_action menu_action @relation(fields: [menu_action_id], references: [id])
+
+  @@unique([user_id, ulb_id, menu_action_id])
+  @@index([user_id, ulb_id])
+  @@index([ulb_id])
+}
+
+// ================================================================
+// ABAC LAYER — attribute-based contextual conditions
+// ================================================================
+
+// Policy attached to a user in a ULB context
+model user_abac_policy {
+  id         Int           @id @default(autoincrement())
+  user_id    Int
+  ulb_id     Int
+  attribute  AbacAttribute
+  // Flexible JSON value: e.g. {"from":"09:00","to":"18:00"} or {"ips":["10.0.0.1"]}
+  value      Json
+  is_active  Boolean       @default(true)
+  created_by Int?
+  created_at DateTime      @default(now())
+  updated_at DateTime      @default(now()) @updatedAt
+
+  user user @relation(fields: [user_id], references: [id])
+
+  @@index([user_id, ulb_id])
+}
+
+// ================================================================
+// AUDIT LOG — every access decision recorded
+// ================================================================
+
+model permission_audit_log {
+  id             BigInt      @id @default(autoincrement())
+  user_id        Int
+  ulb_id         Int
+  menu_action_id Int
+  action         AuditAction
+  reason         String? // "role_grant", "user_override", "abac_fail", "revoked"
+  ip_address     String?
+  user_agent     String?
+  zone_id        Int?
+  ward_id        Int?
+  created_at     DateTime    @default(now())
+
+  user        user        @relation("AuditUser", fields: [user_id], references: [id])
+  ulb         ulb_master  @relation(fields: [ulb_id], references: [id])
+  menu_action menu_action @relation(fields: [menu_action_id], references: [id])
+
+  @@index([user_id, ulb_id])
+  @@index([ulb_id, created_at])
+}
+
+// ================================================================
+// SESSION CONTEXT — tracks which ULB/zone/ward user is active in
+// (a user mapped to multiple ULBs needs to "switch workspace")
+// ================================================================
+
+model user_session_context {
+  id             Int      @id @default(autoincrement())
+  user_id        Int
+  active_ulb_id  Int
+  active_zone_id Int?
+  active_ward_id Int?
+  session_token  String   @unique
+  expires_at     DateTime
+  created_at     DateTime @default(now())
+  updated_at     DateTime @default(now()) @updatedAt
+
+  user user @relation(fields: [user_id], references: [id])
+
+  @@index([user_id])
+  @@index([session_token])
+}
+
+// ================================================================
+// EMPLOYEE — ULB-scoped staff profile
+// ================================================================
+
+model employee {
+  id                Int       @id @default(autoincrement())
+  user_id           Int       @unique
+  ulb_id            Int
+  agency_id         Int
+  module_id         Int?
+  empCode           String
+  empFirstName      String
+  empLastName       String
+  empImage          String?
+  contactNo         String
+  empEmail          String?
+  aadharNo          String?
+  empAddress        String?
+  joiningDate       String?
+  accountHolderName String?
+  accountNo         String?
+  ifscCode          String?
+  bankName          String?
+  jobTitle          String?
+  reportToUserId    Int?
+  blockPayment      Boolean   @default(false)
+  is_active         Boolean   @default(true)
+  version           Int       @default(0)
+  recstatus         Int       @default(1)
+  created_at        DateTime  @default(now())
+  updated_at        DateTime  @default(now()) @updatedAt
+  deleted_at        DateTime?
+
+  user   user    @relation(fields: [user_id], references: [id])
+  agency agency  @relation(fields: [agency_id], references: [id])
+  module module? @relation(fields: [module_id], references: [id])
+
+  @@index([ulb_id])
+}
+
+model agency {
+  id         Int       @id @default(autoincrement())
+  ulb_id     Int
+  name       String
+  is_active  Boolean   @default(true)
+  version    Int       @default(0)
+  recstatus  Int       @default(1)
+  created_at DateTime  @default(now())
+  updated_at DateTime  @default(now()) @updatedAt
+  deleted_at DateTime?
+
+  ulb       ulb_master @relation(fields: [ulb_id], references: [id])
+  employees employee[]
+
+  @@unique([ulb_id, name])
+}
+
+// ================================================================
+// SECURITY & AUTH
+// ================================================================
+
+model tbl_login_attempts {
+  id                          Int       @id @default(autoincrement())
+  user_id                     Int
+  attempts                    Int       @default(0)
+  lastAttempt                 DateTime?
+  otp_expires                 DateTime?
+  isOtpVerified               Boolean   @default(false)
+  otp_sent_count              Int       @default(0)
+  outside_location_attempts   Int       @default(0)
+  outside_location_blockUntil DateTime?
+  otp_block_until             DateTime?
+  user                        user      @relation(fields: [user_id], references: [id])
+}
+
+model tbl_otp_login {
+  id         Int      @id @default(autoincrement())
+  user_id    Int?
+  mobile_no  String
+  otp        String
+  msg        String?
+  is_used    Boolean  @default(false)
+  created_at DateTime @default(now())
+  updated_at DateTime @default(now()) @updatedAt
+  user       user?    @relation(fields: [user_id], references: [id])
+}
+
+model tbl_property_block {
+  id         Int       @id @default(autoincrement())
+  ulb_id     Int?
+  user_id    Int?
+  reason     String?
+  from_block DateTime?
+  to_block   DateTime?
+  ip_address String
+  recstatus  Int       @default(1)
+  created_at DateTime  @default(now())
+
+  user user?       @relation(fields: [user_id], references: [id])
+  ulb  ulb_master? @relation(fields: [ulb_id], references: [id])
+
+  @@index([ulb_id])
+}
+
+model notifications {
+  id         BigInt   @id @default(autoincrement())
+  ulb_id     Int?
+  user_id    Int?
+  room       String?  @db.VarChar(50)
+  title      String
+  message    String
+  type       String?  @db.VarChar(20)
+  data       Json?
+  is_read    Boolean  @default(false)
+  created_at DateTime @default(now())
+
+  user user?       @relation(fields: [user_id], references: [id], onDelete: NoAction)
+  ulb  ulb_master? @relation(fields: [ulb_id], references: [id])
+
+  @@index([ulb_id, is_read])
+  @@index([room])
+  @@map("notifications")
+}
+
+model bank {
+  id         Int      @id @default(autoincrement())
+  name       String   @unique
+  is_active  Boolean  @default(true)
+  created_at DateTime @default(now())
+}
+
+// ================================================================
+// GLOBAL CITIZEN OTP VERIFICATION
+// Single table used across all modules: grievance, property, water…
+// ================================================================
+
+model citizen_otp {
+  id           String   @id @default(uuid()) 
+  ulb_id       Int?    
+  module       String? 
+  action       String  
+  identifier   String   
+  otp          String  
+  is_used      Boolean  @default(false) 
+  attempts     Int      @default(0)    
+  max_attempts Int      @default(3)     
+  ip_address   String?
+  expires_at   DateTime                  
+  created_at   DateTime @default(now())
+  updated_at   DateTime @default(now()) @updatedAt
+  @@index([identifier, is_used, expires_at]) 
+  @@index([ulb_id, module, action])        
+}

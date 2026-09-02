@@ -1,0 +1,107 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../../generated/crm"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_CRM")
+}
+
+model lead_source_master {
+  id          Int      @id @default(autoincrement())
+  name        String   @unique
+  description String?
+  sort_order  Int      @default(0)
+
+  entryBy     Int?
+  entryAt     DateTime @default(now())
+  updateAt    DateTime @updatedAt
+  recstatus   Int      @default(1)
+
+  leads       lead_master[]
+
+  @@index([recstatus])
+}
+
+model lead_status_master {
+  id          Int      @id @default(autoincrement())
+  name        String   @unique
+  color       String?
+  sort_order  Int      @default(0)
+
+  entryBy     Int?
+  entryAt     DateTime @default(now())
+  updateAt    DateTime @updatedAt
+  recstatus   Int      @default(1)
+
+  leads       lead_master[]
+  followups   lead_followup[]
+
+  @@index([recstatus])
+}
+
+model lead_master {
+  id                    Int      @id @default(autoincrement())
+
+  lead_no               String   @unique
+
+  lead_source_id        Int
+  status_id             Int
+
+  customer_name         String
+
+  mobile_no             String
+  alternate_mobile_no   String?
+
+  email                 String?
+
+  address               String?
+  city                  String?
+  state                 String?
+  pincode               String?
+
+  assigned_to           Int?
+
+  last_followup_date    DateTime?
+  next_followup_date    DateTime?
+
+  remarks               String?
+
+  entryBy               Int?
+  entryAt               DateTime @default(now())
+  updateAt              DateTime @updatedAt
+  recstatus             Int      @default(1)
+
+  lead_source           lead_source_master @relation(fields: [lead_source_id], references: [id])
+  status                lead_status_master @relation(fields: [status_id], references: [id])
+
+  followups             lead_followup[]
+
+  @@index([mobile_no])
+  @@index([assigned_to])
+  @@index([lead_source_id])
+  @@index([status_id])
+}
+
+model lead_followup {
+  id                    Int      @id @default(autoincrement())
+
+  lead_id               Int
+  status_id             Int
+
+  followup_date         DateTime @default(now())
+  remarks               String?
+
+  next_followup_date    DateTime?
+
+  entryBy               Int?
+  entryAt               DateTime @default(now())
+
+  lead                  lead_master        @relation(fields: [lead_id], references: [id])
+  status                lead_status_master @relation(fields: [status_id], references: [id])
+
+  @@index([lead_id])
+  @@index([status_id])
+  @@index([followup_date])
+}

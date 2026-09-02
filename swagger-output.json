@@ -1,0 +1,641 @@
+{
+  "swagger": "2.0",
+  "info": {
+    "title": "My API",
+    "description": "Description",
+    "version": "1.0.0"
+  },
+  "host": "localhost:6971",
+  "basePath": "/",
+  "schemes": [
+    "http"
+  ],
+  "paths": {
+    "/add-shop": {
+      "post": {
+        "description": "",
+        "parameters": [
+          {
+            "name": "body",
+            "in": "body",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "ulb": {
+                  "example": "any"
+                },
+                "zoneId": {
+                  "example": "any"
+                },
+                "ward": {
+                  "example": "any"
+                },
+                "nigam_shop_no": {
+                  "example": "any"
+                },
+                "unique_property_id": {
+                  "example": "any"
+                },
+                "build_by": {
+                  "example": "any"
+                },
+                "nigam_reg_no": {
+                  "example": "any"
+                },
+                "allot_date": {
+                  "example": "any"
+                },
+                "gender": {
+                  "example": "any"
+                },
+                "name": {
+                  "example": "any"
+                },
+                "relation": {
+                  "example": "any"
+                },
+                "guardian": {
+                  "example": "any"
+                },
+                "contact": {
+                  "example": "any"
+                },
+                "address": {
+                  "example": "any"
+                },
+                "pin": {
+                  "example": "any"
+                },
+                "amount": {
+                  "example": "any"
+                },
+                "eff_date": {
+                  "example": "any"
+                }
+              }
+            }
+          }
+        ],
+        "responses": {
+          "default": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/consumer/by-property-id": {
+      "get": {
+        "description": "",
+        "parameters": [
+          {
+            "name": "iv",
+            "in": "query",
+            "type": "string"
+          },
+          {
+            "name": "ed",
+            "in": "query",
+            "type": "string"
+          }
+        ],
+        "responses": {
+          "default": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/get-shop-list": {
+      "get": {
+        "description": "",
+        "parameters": [
+          {
+            "name": "zone_id",
+            "in": "query",
+            "type": "string"
+          },
+          {
+            "name": "wardId",
+            "in": "query",
+            "type": "string"
+          },
+          {
+            "name": "shopNo",
+            "in": "query",
+            "type": "string"
+          },
+          {
+            "name": "consumerno",
+            "in": "query",
+            "type": "string"
+          },
+          {
+            "name": "ownerName",
+            "in": "query",
+            "type": "string"
+          },
+          {
+            "name": "primaryContactNo",
+            "in": "query",
+            "type": "string"
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "type": "string"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "type": "string"
+          }
+        ],
+        "responses": {
+          "default": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/get-by-consumer-no": {
+      "get": {
+        "description": "",
+        "parameters": [
+          {
+            "name": "iv",
+            "in": "query",
+            "type": "string"
+          },
+          {
+            "name": "ed",
+            "in": "query",
+            "type": "string"
+          }
+        ],
+        "responses": {
+          "default": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/update-existing": {
+      "post": {
+        "description": "",
+        "parameters": [
+          {
+            "name": "iv",
+            "in": "query",
+            "type": "string"
+          },
+          {
+            "name": "ed",
+            "in": "query",
+            "type": "string"
+          },
+          {
+            "name": "body",
+            "in": "body",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "ulb": {
+                  "example": "any"
+                },
+                "zoneId": {
+                  "example": "any"
+                },
+                "ward": {
+                  "example": "any"
+                },
+                "nigam_shop_no": {
+                  "example": "any"
+                },
+                "unique_property_id": {
+                  "example": "any"
+                },
+                "build_by": {
+                  "example": "any"
+                },
+                "nigam_reg_no": {
+                  "example": "any"
+                },
+                "allot_date": {
+                  "example": "any"
+                },
+                "gender": {
+                  "example": "any"
+                },
+                "name": {
+                  "example": "any"
+                },
+                "relation": {
+                  "example": "any"
+                },
+                "guardian": {
+                  "example": "any"
+                },
+                "contact": {
+                  "example": "any"
+                },
+                "address": {
+                  "example": "any"
+                },
+                "pin": {
+                  "example": "any"
+                },
+                "amount": {
+                  "example": "any"
+                },
+                "eff_date": {
+                  "example": "any"
+                }
+              }
+            }
+          }
+        ],
+        "responses": {
+          "default": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/deactivate": {
+      "post": {
+        "description": "",
+        "parameters": [
+          {
+            "name": "iv",
+            "in": "query",
+            "type": "string"
+          },
+          {
+            "name": "ed",
+            "in": "query",
+            "type": "string"
+          },
+          {
+            "name": "body",
+            "in": "body",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "wardId": {
+                  "example": "any"
+                },
+                "ulbId": {
+                  "example": "any"
+                },
+                "zoneId": {
+                  "example": "any"
+                },
+                "remarks": {
+                  "example": "any"
+                }
+              }
+            }
+          }
+        ],
+        "responses": {
+          "default": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/owner-update": {
+      "put": {
+        "description": "",
+        "parameters": [
+          {
+            "name": "iv",
+            "in": "query",
+            "type": "string"
+          },
+          {
+            "name": "ed",
+            "in": "query",
+            "type": "string"
+          },
+          {
+            "name": "body",
+            "in": "body",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "occupancyId": {
+                  "example": "any"
+                },
+                "firmName": {
+                  "example": "any"
+                },
+                "ownerName": {
+                  "example": "any"
+                },
+                "gender": {
+                  "example": "any"
+                },
+                "guardianName": {
+                  "example": "any"
+                },
+                "relation": {
+                  "example": "any"
+                },
+                "contactNo": {
+                  "example": "any"
+                },
+                "address": {
+                  "example": "any"
+                },
+                "pincode": {
+                  "example": "any"
+                }
+              }
+            }
+          }
+        ],
+        "responses": {
+          "400": {
+            "description": "Bad Request"
+          }
+        }
+      }
+    },
+    "/get-rate": {
+      "get": {
+        "description": "",
+        "parameters": [
+          {
+            "name": "iv",
+            "in": "query",
+            "type": "string"
+          },
+          {
+            "name": "ed",
+            "in": "query",
+            "type": "string"
+          }
+        ],
+        "responses": {
+          "default": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/update-rate": {
+      "post": {
+        "description": "",
+        "parameters": [
+          {
+            "name": "iv",
+            "in": "query",
+            "type": "string"
+          },
+          {
+            "name": "ed",
+            "in": "query",
+            "type": "string"
+          },
+          {
+            "name": "body",
+            "in": "body",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "eff_date": {
+                  "example": "any"
+                },
+                "monthlyAmount": {
+                  "example": "any"
+                }
+              }
+            }
+          }
+        ],
+        "responses": {
+          "default": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/new-application": {
+      "post": {
+        "description": "",
+        "parameters": [
+          {
+            "name": "body",
+            "in": "body",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "ulb": {
+                  "example": "any"
+                },
+                "zone": {
+                  "example": "any"
+                },
+                "ward": {
+                  "example": "any"
+                },
+                "occupancy_type": {
+                  "example": "any"
+                },
+                "establish_date": {
+                  "example": "any"
+                },
+                "unique_property_id": {
+                  "example": "any"
+                },
+                "gender": {
+                  "example": "any"
+                },
+                "cons_name": {
+                  "example": "any"
+                },
+                "relation": {
+                  "example": "any"
+                },
+                "guardian_name": {
+                  "example": "any"
+                },
+                "contact_no": {
+                  "example": "any"
+                },
+                "address": {
+                  "example": "any"
+                },
+                "pincode": {
+                  "example": "any"
+                },
+                "firm_name": {
+                  "example": "any"
+                },
+                "licence_type": {
+                  "example": "any"
+                },
+                "old_lic_no": {
+                  "example": "any"
+                },
+                "no_of_employee": {
+                  "example": "any"
+                },
+                "category_type": {
+                  "example": "any"
+                },
+                "range_type": {
+                  "example": "any"
+                },
+                "effect_date": {
+                  "example": "any"
+                }
+              }
+            }
+          }
+        ],
+        "responses": {
+          "default": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/master-list": {
+      "get": {
+        "description": "",
+        "parameters": [
+          {
+            "name": "ulb",
+            "in": "query",
+            "type": "string"
+          }
+        ],
+        "responses": {
+          "default": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/dets-by-catid": {
+      "get": {
+        "description": "",
+        "parameters": [
+          {
+            "name": "catId",
+            "in": "query",
+            "type": "string"
+          },
+          {
+            "name": "ulb",
+            "in": "query",
+            "type": "string"
+          }
+        ],
+        "responses": {
+          "default": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/search": {
+      "get": {
+        "description": "",
+        "parameters": [
+          {
+            "name": "zone_id",
+            "in": "query",
+            "type": "string"
+          },
+          {
+            "name": "wardId",
+            "in": "query",
+            "type": "string"
+          },
+          {
+            "name": "applicationNo",
+            "in": "query",
+            "type": "string"
+          },
+          {
+            "name": "firmName",
+            "in": "query",
+            "type": "string"
+          },
+          {
+            "name": "ownerName",
+            "in": "query",
+            "type": "string"
+          },
+          {
+            "name": "contactNo",
+            "in": "query",
+            "type": "string"
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "type": "string"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "type": "string"
+          }
+        ],
+        "responses": {
+          "default": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/consumer/by-trade-id": {
+      "get": {
+        "description": "",
+        "parameters": [
+          {
+            "name": "iv",
+            "in": "query",
+            "type": "string"
+          },
+          {
+            "name": "ed",
+            "in": "query",
+            "type": "string"
+          }
+        ],
+        "responses": {
+          "default": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/update-application": {
+      "post": {
+        "description": "",
+        "parameters": [
+          {
+            "name": "iv",
+            "in": "query",
+            "type": "string"
+          },
+          {
+            "name": "ed",
+            "in": "query",
+            "type": "string"
+          }
+        ],
+        "responses": {
+          "default": {
+            "description": ""
+          }
+        }
+      }
+    }
+  }
+}

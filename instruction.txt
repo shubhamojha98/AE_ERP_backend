@@ -1,0 +1,20 @@
+node .\generate.js
+node .\migrate.js
+
+npx prisma migrate dev --name add_qr --schema=prisma/schema.prisma
+npx prisma migrate status --schema=prisma/schema.prisma
+npx prisma migrate reset
+
+Do you need to preserve the data currently in the up_panel database?
+If NO, I will proceed with npx prisma migrate reset.
+If YES, I will proceed with npx prisma db push.
+
+1. npx ts-node prisma/seed-menus.ts
+   (Seeds the exhaustive menu hierarchy and actions)
+
+2. npx ts-node prisma/seed.ts
+   (Seeds ULBs, Agency, Roles, Modules, Users, and Permissions)
+
+3. npx ts-node prisma/seed-zones-wards.ts
+   (Seeds full Zones/Wards data for Zamania)
+

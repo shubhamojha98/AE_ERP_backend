@@ -1,0 +1,41 @@
+generator client {
+    provider = "prisma-client-js"
+    output   = "../../generated/db-log"
+}
+
+datasource db {
+    provider = "postgresql"
+    url      = env("DATABASE_LOGS")
+}
+
+model tbl_user_login_logs {
+    id              Int      @id @default(autoincrement())
+    username        String
+    password        String
+    userType        String
+    login_id        String?
+    ip_address      String?
+    user_agent      String?
+    latitude        String?
+    longitude       String?
+    ismobileDesktop String?
+    is_success      Boolean  @default(false)
+    entryBy         Int?
+    created_at      DateTime @default(now())
+    updated_at      DateTime @default(now()) @updatedAt
+}
+
+model tbl_user_logout_logs {
+    id         Int      @id @default(autoincrement())
+    username   String
+    password   String
+    userType   String
+    login_id   String?
+    ip_address String?
+    user_agent String?
+    latitude   String?
+    longitude  String?
+    entryBy    Int?
+    created_at DateTime @default(now())
+    updated_at DateTime @default(now()) @updatedAt
+}
