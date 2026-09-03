@@ -7,17 +7,12 @@ import { extractPayload, encryptData } from "../../lib/apiCryptography";
 import { inventory } from "../../lib/globalprimsaclient";
 import { Prisma } from "../../generated/inventory";
 import convertBigIntToString from '../../lib/bigIntConversion';
+import { generateCategoryCode } from "../../lib/generateCategoryCode";
 
 
 // ============================================================================
 // PRODUCT CATEGORY CONTROLLER LOGIC
 // ============================================================================
-
-// NOTE on parentCategory: this file treats it as a numeric category id
-// (BigInt/Number), validated against real rows — NOT a category name.
-// If your frontend is still sending the parent's *name* (older Firestore
-// version was), it needs to switch to sending the parent's id, or these
-// validations will always fail.
 
 /**
  * Add / Create a new Product Category
@@ -33,14 +28,8 @@ export const createCategory = async (
         const {
             companyId,
             name,
-            code,
-            demoSeedId,
             description,
-            isDemo,
-            order,
-            parentCategory,
-            searchName,
-            status,
+            isActive,
             groupId,
         } = data;
 
@@ -84,27 +73,8 @@ export const createCategory = async (
             );
         }
 
-        // Check parent category existence if provided.
-        // BUG FIX: this previously didn't scope by companyId, so a
-        // category id from a *different* company could be set as parent.
-        if (parentCategory !== undefined && parentCategory !== null) {
-            const parentExists = await inventory.productCategory.findFirst({
-                where: {
-                    id: BigInt(parentCategory),
-                    companyId: parsedCompanyId,
-                    recStatus: 1,
-                    isDeleted: false,
-                },
-            });
-
-            if (!parentExists) {
-                return genrateResponse(
-                    res,
-                    HttpStatus.BadRequest,
-                    "Parent category not found."
-                );
-            }
-        }
+        // Always auto-generate category code on backend
+        const categoryCode = await generateCategoryCode(parsedCompanyId, name);
 
         const createdBy = currentUser?.userId
             ? String(currentUser.userId)
@@ -116,19 +86,9 @@ export const createCategory = async (
             data: {
                 companyId: parsedCompanyId,
                 name: name.trim(),
-                code: code ? String(code).trim() : null,
+                code: categoryCode,
                 description: description ? String(description).trim() : null,
-                demoSeedId: demoSeedId || null,
-                isDemo: isDemo !== undefined ? Boolean(isDemo) : false,
-                order: order !== undefined ? Number(order) : null,
-                parentCategory:
-                    parentCategory !== undefined && parentCategory !== null
-                        ? Number(parentCategory)
-                        : null,
-                searchName: searchName
-                    ? String(searchName).trim()
-                    : name.trim().toLowerCase(),
-                status: status || "ACTIVE",
+                isActive: isActive !== undefined ? Boolean(isActive) : true,
                 groupId: groupId ? String(groupId) : null,
                 createdBy: createdBy,
                 recStatus: 1,
@@ -163,12 +123,8 @@ export const getCategoryList = async (req: Request, res: Response) => {
         const limit = Math.max(1, Number(rawParams.limit) || 10);
         const search = rawParams.search as string;
         const companyId = rawParams.companyId ? Number(rawParams.companyId) : undefined;
-        const status = rawParams.status as string;
+        const rawIsActive = rawParams.isActive !== undefined ? rawParams.isActive : rawParams.status;
         const groupId = rawParams.groupId as string;
-        const parentCategory =
-            rawParams.parentCategory !== undefined && rawParams.parentCategory !== ""
-                ? Number(rawParams.parentCategory)
-                : undefined;
 
         const where: Prisma.ProductCategoryWhereInput = {
             recStatus: 1,
@@ -179,16 +135,12 @@ export const getCategoryList = async (req: Request, res: Response) => {
             where.companyId = companyId;
         }
 
-        if (status) {
-            where.status = status;
-        }
-
         if (groupId) {
             where.groupId = groupId;
         }
 
-        if (parentCategory !== undefined) {
-            where.parentCategory = parentCategory;
+        if (rawIsActive !== undefined && rawIsActive !== null && rawIsActive !== "") {
+            where.isActive = rawIsActive === "true" || rawIsActive === true;
         }
 
         if (search && search.trim() !== "") {
@@ -212,12 +164,6 @@ export const getCategoryList = async (req: Request, res: Response) => {
                         mode: "insensitive",
                     },
                 },
-                {
-                    searchName: {
-                        contains: searchTerm,
-                        mode: "insensitive",
-                    },
-                },
             ];
         }
 
@@ -226,6 +172,11 @@ export const getCategoryList = async (req: Request, res: Response) => {
                 where,
                 skip: (page - 1) * limit,
                 take: limit,
+                include: {
+                    subCategories: {
+                        where: { recStatus: 1, isDeleted: false },
+                    },
+                },
                 orderBy: {
                     createdAt: "desc",
                 },
@@ -282,6 +233,11 @@ export const getCategoryById = async (req: AuthenticatedRequest, res: Response) 
                 recStatus: 1,
                 isDeleted: false,
             },
+            include: {
+                subCategories: {
+                    where: { recStatus: 1, isDeleted: false },
+                },
+            },
         });
 
         if (!category) {
@@ -292,9 +248,6 @@ export const getCategoryById = async (req: AuthenticatedRequest, res: Response) 
             );
         }
 
-        // BUG FIX: previously any authenticated user could fetch any
-        // company's category by guessing/incrementing the id. Enforce
-        // company scoping when the token carries a companyId.
         if (
             currentUser?.companyId !== undefined &&
             Number(currentUser.companyId) !== category.companyId
@@ -363,7 +316,6 @@ export const updateCategory = async (
             );
         }
 
-        // BUG FIX: company scoping, same as getCategoryById.
         if (
             currentUser?.companyId !== undefined &&
             Number(currentUser.companyId) !== existingCategory.companyId
@@ -412,40 +364,6 @@ export const updateCategory = async (
             }
         }
 
-        // BUG FIX: parentCategory was never validated on update (only on
-        // create). This let an update set a non-existent, cross-company,
-        // or self-referencing parent id.
-        if (data.parentCategory !== undefined && data.parentCategory !== null) {
-            const newParentId = Number(data.parentCategory);
-
-            if (newParentId === Number(categoryBigId)) {
-                return genrateResponse(
-                    res,
-                    HttpStatus.BadRequest,
-                    "A category cannot be its own parent."
-                );
-            }
-
-            const parentExists = await inventory.productCategory.findFirst({
-                where: {
-                    id: BigInt(newParentId),
-                    companyId: data.companyId
-                        ? Number(data.companyId)
-                        : existingCategory.companyId,
-                    recStatus: 1,
-                    isDeleted: false,
-                },
-            });
-
-            if (!parentExists) {
-                return genrateResponse(
-                    res,
-                    HttpStatus.BadRequest,
-                    "Parent category not found."
-                );
-            }
-        }
-
         const updatedCategory = await inventory.productCategory.update({
             where: {
                 id: categoryBigId,
@@ -459,18 +377,7 @@ export const updateCategory = async (
                 ...(data.description !== undefined && {
                     description: data.description ? String(data.description).trim() : null,
                 }),
-                ...(data.isDemo !== undefined && { isDemo: Boolean(data.isDemo) }),
-                ...(data.order !== undefined && {
-                    order: data.order !== null ? Number(data.order) : null,
-                }),
-                ...(data.parentCategory !== undefined && {
-                    parentCategory:
-                        data.parentCategory !== null ? Number(data.parentCategory) : null,
-                }),
-                ...(data.searchName !== undefined && {
-                    searchName: data.searchName ? String(data.searchName).trim() : null,
-                }),
-                ...(data.status !== undefined && { status: data.status }),
+                ...(data.isActive !== undefined && { isActive: Boolean(data.isActive) }),
                 ...(data.groupId !== undefined && {
                     groupId: data.groupId ? String(data.groupId) : null,
                 }),
@@ -499,9 +406,6 @@ export const updateCategory = async (
 
 /**
  * Soft Delete (Archive) Product Category
- * Marks the row inactive without removing it — linked products are left
- * untouched. This is the "Archive" action in the frontend, kept under
- * its original name so existing routes calling deleteCategory don't break.
  */
 export const deleteCategory = async (
     req: AuthenticatedRequest,
@@ -538,7 +442,6 @@ export const deleteCategory = async (
             );
         }
 
-        // BUG FIX: company scoping, same as getCategoryById.
         if (
             currentUser?.companyId !== undefined &&
             Number(currentUser.companyId) !== existingCategory.companyId
@@ -589,10 +492,8 @@ export const deleteCategory = async (
 
 /**
  * Hard Delete Product Category (permanent)
- * Should be gated by a super-admin-only middleware at the route level,
- * matching the isSuperAdmin() check in the frontend and firestore.rules.
- * Refuses to delete if the category still has child categories or
- * products pointing at it, matching the frontend's confirm-dialog copy.
+ * Refuses to delete if the category still has child subcategories or
+ * products pointing at it.
  */
 export const hardDeleteCategory = async (
     req: AuthenticatedRequest,
@@ -636,10 +537,10 @@ export const hardDeleteCategory = async (
             );
         }
 
-        const [childCount, linkedProductCount] = await Promise.all([
-            inventory.productCategory.count({
+        const [subCategoryCount, linkedProductCount] = await Promise.all([
+            inventory.productSubCategory.count({
                 where: {
-                    parentCategory: Number(categoryBigId),
+                    categoryId: categoryBigId,
                     companyId: existingCategory.companyId,
                     isDeleted: false,
                 },
@@ -653,11 +554,11 @@ export const hardDeleteCategory = async (
             }),
         ]);
 
-        if (childCount > 0 || linkedProductCount > 0) {
+        if (subCategoryCount > 0 || linkedProductCount > 0) {
             return genrateResponse(
                 res,
                 HttpStatus.BadRequest,
-                "Cannot delete: category still has child categories or linked products."
+                "Cannot delete: category still has child subcategories or linked products."
             );
         }
 
@@ -686,9 +587,6 @@ export const hardDeleteCategory = async (
 /**
  * Bulk Hard Delete Product Categories
  * Body: { ids: (string|number)[] }
- * Super-admin only (gate at route level). Skips — rather than fails — any
- * id that still has children or linked products, and reports which ones
- * were skipped so the frontend can tell the user.
  */
 export const bulkDeleteCategories = async (
     req: AuthenticatedRequest,
@@ -737,10 +635,10 @@ export const bulkDeleteCategories = async (
         const skipped: string[] = [];
 
         for (const category of categories) {
-            const [childCount, linkedProductCount] = await Promise.all([
-                inventory.productCategory.count({
+            const [subCategoryCount, linkedProductCount] = await Promise.all([
+                inventory.productSubCategory.count({
                     where: {
-                        parentCategory: Number(category.id),
+                        categoryId: category.id,
                         companyId: category.companyId,
                         isDeleted: false,
                     },
@@ -754,7 +652,7 @@ export const bulkDeleteCategories = async (
                 }),
             ]);
 
-            if (childCount > 0 || linkedProductCount > 0) {
+            if (subCategoryCount > 0 || linkedProductCount > 0) {
                 skipped.push(category.id.toString());
             } else {
                 deletable.push(category.id);
@@ -773,7 +671,7 @@ export const bulkDeleteCategories = async (
             "Bulk delete completed.",
             encryptData({
                 deletedCount: deletable.length,
-                skipped, // ids that still have children/products, left untouched
+                skipped,
             })
         );
     } catch (err: any) {
@@ -792,10 +690,8 @@ export const bulkDeleteCategories = async (
 /**
  * Merge Product Categories
  * Body: { sourceIds: (string|number)[], targetId: string|number }
- * Super-admin only (gate at route level). Reassigns every product on the
- * source categories to the target category, then permanently deletes the
- * source categories. Runs as a transaction so a failure partway through
- * can't leave products pointing at a deleted category.
+ * Reassigns products and subcategories on the source categories to target category,
+ * then permanently deletes source categories.
  */
 export const mergeCategories = async (
     req: AuthenticatedRequest,
@@ -864,16 +760,14 @@ export const mergeCategories = async (
         await inventory.$transaction([
             inventory.product.updateMany({
                 where: { companyId: target.companyId, categoryId: { in: sourceBigIds } },
-                data: { categoryId: targetBigId, category: target.name },
-            }),
-            // Re-point any category that had a merged-away category as its
-            // parent, so the hierarchy doesn't dangle after the merge.
-            inventory.productCategory.updateMany({
+                data: { categoryId: targetBigId },
+                }),
+            inventory.productSubCategory.updateMany({
                 where: {
                     companyId: target.companyId,
-                    parentCategory: { in: sourceBigIds.map((id) => Number(id)) },
+                    categoryId: { in: sourceBigIds },
                 },
-                data: { parentCategory: Number(targetBigId) },
+                data: { categoryId: targetBigId },
             }),
             inventory.productCategory.deleteMany({
                 where: { companyId: target.companyId, id: { in: sourceBigIds } },
@@ -895,6 +789,712 @@ export const mergeCategories = async (
             res,
             err?.status || HttpStatus.BadRequest,
             err?.message || "Failed to merge product categories."
+        );
+    }
+};
+
+
+// ============================================================================
+// PRODUCT SUB-CATEGORY CONTROLLER LOGIC
+// ============================================================================
+
+/**
+ * Add / Create a new Product SubCategory
+ */
+export const createSubCategory = async (
+    req: AuthenticatedRequest,
+    res: Response
+) => {
+    try {
+        const data = extractPayload(req.body);
+        const currentUser = req?.user as AuthPayload;
+
+        const {
+            companyId,
+            categoryId,
+            name,
+            description,
+            isActive,
+            groupId,
+        } = data;
+
+        // Required Field Validations
+        if (!name || name.trim() === "") {
+            return genrateResponse(
+                res,
+                HttpStatus.BadRequest,
+                "Subcategory name is required."
+            );
+        }
+
+        if (!companyId) {
+            return genrateResponse(
+                res,
+                HttpStatus.BadRequest,
+                "Company ID is required."
+            );
+        }
+
+        if (!categoryId) {
+            return genrateResponse(
+                res,
+                HttpStatus.BadRequest,
+                "Category ID is required."
+            );
+        }
+
+        const parsedCompanyId = Number(companyId);
+        const categoryBigId = BigInt(categoryId);
+
+        // Check parent category exists
+        const parentCategoryExists = await inventory.productCategory.findFirst({
+            where: {
+                id: categoryBigId,
+                companyId: parsedCompanyId,
+                recStatus: 1,
+                isDeleted: false,
+            },
+        });
+
+        if (!parentCategoryExists) {
+            return genrateResponse(
+                res,
+                HttpStatus.BadRequest,
+                "Parent category not found for this company."
+            );
+        }
+
+        // Check duplicate subcategory name within the same category & company
+        const existingSubCategory = await inventory.productSubCategory.findFirst({
+            where: {
+                companyId: parsedCompanyId,
+                categoryId: categoryBigId,
+                name: {
+                    equals: name.trim(),
+                    mode: "insensitive",
+                },
+                recStatus: 1,
+                isDeleted: false,
+            },
+        });
+
+        if (existingSubCategory) {
+            return genrateResponse(
+                res,
+                HttpStatus.BadRequest,
+                "Subcategory with this name already exists in this category."
+            );
+        }
+
+        const createdBy = currentUser?.userId
+            ? String(currentUser.userId)
+            : data.createdBy
+                ? String(data.createdBy)
+                : "SYSTEM";
+
+        const newSubCategory = await inventory.productSubCategory.create({
+            data: {
+                companyId: parsedCompanyId,
+                categoryId: categoryBigId,
+                name: name.trim(),
+                description: description ? String(description).trim() : null,
+                isActive: isActive !== undefined ? Boolean(isActive) : true,
+                groupId: groupId ? String(groupId) : null,
+                createdBy: createdBy,
+                recStatus: 1,
+                isDeleted: false,
+            },
+        });
+
+        return genrateResponse(
+            res,
+            HttpStatus.OK,
+            "Product subcategory created successfully.",
+            encryptData(convertBigIntToString(newSubCategory))
+        );
+    } catch (err: any) {
+        console.error(`[${new Date().toISOString()}] Error creating subcategory:`, err);
+        return genrateResponse(
+            res,
+            err?.status || HttpStatus.BadRequest,
+            err?.message || "Failed to create product subcategory."
+        );
+    }
+};
+
+/**
+ * Get Product SubCategory List with Pagination, Filtering, and Search
+ */
+export const getSubCategoryList = async (req: Request, res: Response) => {
+    try {
+        const rawParams = req.query?.ed ? extractPayload(req.query) : req.query;
+
+        const page = Math.max(1, Number(rawParams.page) || 1);
+        const limit = Math.max(1, Number(rawParams.limit) || 10);
+        const search = rawParams.search as string;
+        const companyId = rawParams.companyId ? Number(rawParams.companyId) : undefined;
+        const categoryId = rawParams.categoryId ? BigInt(rawParams.categoryId) : undefined;
+        const rawIsActive = rawParams.isActive !== undefined ? rawParams.isActive : rawParams.status;
+        const groupId = rawParams.groupId as string;
+
+        const where: Prisma.ProductSubCategoryWhereInput = {
+            recStatus: 1,
+            isDeleted: false,
+        };
+
+        if (companyId) {
+            where.companyId = companyId;
+        }
+
+        if (categoryId) {
+            where.categoryId = categoryId;
+        }
+
+        if (groupId) {
+            where.groupId = groupId;
+        }
+
+        if (rawIsActive !== undefined && rawIsActive !== null && rawIsActive !== "") {
+            where.isActive = rawIsActive === "true" || rawIsActive === true;
+        }
+
+       
+
+        if (search && search.trim() !== "") {
+            const searchTerm = search.trim();
+            where.OR = [
+                {
+                    name: {
+                        contains: searchTerm,
+                        mode: "insensitive",
+                    },
+                },
+                {
+                    description: {
+                        contains: searchTerm,
+                        mode: "insensitive",
+                    },
+                },
+            ];
+        }
+
+        const [subCategoryList, total] = await inventory.$transaction([
+            inventory.productSubCategory.findMany({
+                where,
+                skip: (page - 1) * limit,
+                take: limit,
+                include: {
+                    categoryMaster: true,
+                },
+                orderBy: {
+                    createdAt: "desc",
+                },
+            }),
+            inventory.productSubCategory.count({ where }),
+        ]);
+
+        return genrateResponse(
+            res,
+            HttpStatus.OK,
+            "Product subcategory list fetched successfully.",
+            encryptData({
+                subCategories: convertBigIntToString(subCategoryList),
+                pagination: {
+                    page,
+                    limit,
+                    total,
+                    totalPages: Math.ceil(total / limit),
+                },
+            })
+        );
+    } catch (err: any) {
+        console.error(
+            `[${new Date().toISOString()}] Error fetching subcategory list:`,
+            err
+        );
+        return genrateResponse(
+            res,
+            err?.status || HttpStatus.BadRequest,
+            err?.message || "Failed to fetch product subcategory list."
+        );
+    }
+};
+
+/**
+ * Get Product SubCategory by ID
+ */
+export const getSubCategoryById = async (req: AuthenticatedRequest, res: Response) => {
+    try {
+        const id = req.params.id || (req.query.id as string);
+        const currentUser = req?.user as AuthPayload;
+
+        if (!id) {
+            return genrateResponse(
+                res,
+                HttpStatus.BadRequest,
+                "Subcategory ID is required."
+            );
+        }
+
+        const subCategory = await inventory.productSubCategory.findFirst({
+            where: {
+                id: BigInt(id),
+                recStatus: 1,
+                isDeleted: false,
+            },
+            include: {
+                categoryMaster: true,
+            },
+        });
+
+        if (!subCategory) {
+            return genrateResponse(
+                res,
+                HttpStatus.NotFound,
+                "Product subcategory not found."
+            );
+        }
+
+        if (
+            currentUser?.companyId !== undefined &&
+            Number(currentUser.companyId) !== subCategory.companyId
+        ) {
+            return genrateResponse(
+                res,
+                HttpStatus.Forbidden,
+                "You do not have access to this subcategory."
+            );
+        }
+
+        return genrateResponse(
+            res,
+            HttpStatus.OK,
+            "Product subcategory details fetched successfully.",
+            encryptData(convertBigIntToString(subCategory))
+        );
+    } catch (err: any) {
+        console.error(
+            `[${new Date().toISOString()}] Error fetching subcategory details:`,
+            err
+        );
+        return genrateResponse(
+            res,
+            err?.status || HttpStatus.BadRequest,
+            err?.message || "Failed to fetch product subcategory details."
+        );
+    }
+};
+
+/**
+ * Update an existing Product SubCategory
+ */
+export const updateSubCategory = async (
+    req: AuthenticatedRequest,
+    res: Response
+) => {
+    try {
+        const data = extractPayload(req.body);
+        const currentUser = req?.user as AuthPayload;
+        const subCategoryId = req.params.id || data.id;
+
+        if (!subCategoryId) {
+            return genrateResponse(
+                res,
+                HttpStatus.BadRequest,
+                "Subcategory ID is required for update."
+            );
+        }
+
+        const subCategoryBigId = BigInt(subCategoryId);
+
+        const existingSubCategory = await inventory.productSubCategory.findFirst({
+            where: {
+                id: subCategoryBigId,
+                recStatus: 1,
+                isDeleted: false,
+            },
+        });
+
+        if (!existingSubCategory) {
+            return genrateResponse(
+                res,
+                HttpStatus.NotFound,
+                "Product subcategory not found."
+            );
+        }
+
+        if (
+            currentUser?.companyId !== undefined &&
+            Number(currentUser.companyId) !== existingSubCategory.companyId
+        ) {
+            return genrateResponse(
+                res,
+                HttpStatus.Forbidden,
+                "You do not have access to this subcategory."
+            );
+        }
+
+        const targetCompanyId = data.companyId
+            ? Number(data.companyId)
+            : existingSubCategory.companyId;
+        const targetCategoryId = data.categoryId
+            ? BigInt(data.categoryId)
+            : existingSubCategory.categoryId;
+
+        // If categoryId is changing, verify new parent category exists
+        if (data.categoryId && BigInt(data.categoryId) !== existingSubCategory.categoryId) {
+            const parentCategoryExists = await inventory.productCategory.findFirst({
+                where: {
+                    id: targetCategoryId,
+                    companyId: targetCompanyId,
+                    recStatus: 1,
+                    isDeleted: false,
+                },
+            });
+
+            if (!parentCategoryExists) {
+                return genrateResponse(
+                    res,
+                    HttpStatus.BadRequest,
+                    "Parent category not found."
+                );
+            }
+        }
+
+        // Check duplicate name if updating name or category
+        if (data.name || data.categoryId) {
+            const newName = data.name ? data.name.trim() : existingSubCategory.name;
+            const duplicate = await inventory.productSubCategory.findFirst({
+                where: {
+                    companyId: targetCompanyId,
+                    categoryId: targetCategoryId,
+                    name: {
+                        equals: newName,
+                        mode: "insensitive",
+                    },
+                    id: {
+                        not: subCategoryBigId,
+                    },
+                    recStatus: 1,
+                    isDeleted: false,
+                },
+            });
+
+            if (duplicate) {
+                return genrateResponse(
+                    res,
+                    HttpStatus.BadRequest,
+                    "Subcategory with this name already exists in this category."
+                );
+            }
+        }
+
+        const updatedBy = currentUser?.userId
+            ? String(currentUser.userId)
+            : data.updatedBy
+                ? String(data.updatedBy)
+                : "SYSTEM";
+
+        const updatedSubCategory = await inventory.productSubCategory.update({
+            where: {
+                id: subCategoryBigId,
+            },
+            data: {
+                ...(data.companyId !== undefined && {
+                    companyId: Number(data.companyId),
+                }),
+                ...(data.categoryId !== undefined && {
+                    categoryId: BigInt(data.categoryId),
+                }),
+                ...(data.name !== undefined && { name: data.name.trim() }),
+                ...(data.description !== undefined && {
+                    description: data.description ? String(data.description).trim() : null,
+                }),
+                ...(data.isActive !== undefined && { isActive: Boolean(data.isActive) }),
+                ...(data.groupId !== undefined && {
+                    groupId: data.groupId ? String(data.groupId) : null,
+                }),
+                updatedBy: updatedBy,
+            },
+        });
+
+        return genrateResponse(
+            res,
+            HttpStatus.OK,
+            "Product subcategory updated successfully.",
+            encryptData(convertBigIntToString(updatedSubCategory))
+        );
+    } catch (err: any) {
+        console.error(
+            `[${new Date().toISOString()}] Error updating subcategory:`,
+            err
+        );
+        return genrateResponse(
+            res,
+            err?.status || HttpStatus.BadRequest,
+            err?.message || "Failed to update product subcategory."
+        );
+    }
+};
+
+/**
+ * Soft Delete (Archive) Product SubCategory
+ */
+export const deleteSubCategory = async (
+    req: AuthenticatedRequest,
+    res: Response
+) => {
+    try {
+        const data = extractPayload(req.body);
+        const currentUser = req?.user as AuthPayload;
+        const subCategoryId = req.params.id || data.id;
+
+        if (!subCategoryId) {
+            return genrateResponse(
+                res,
+                HttpStatus.BadRequest,
+                "Subcategory ID is required for deletion."
+            );
+        }
+
+        const subCategoryBigId = BigInt(subCategoryId);
+
+        const existingSubCategory = await inventory.productSubCategory.findFirst({
+            where: {
+                id: subCategoryBigId,
+                recStatus: 1,
+                isDeleted: false,
+            },
+        });
+
+        if (!existingSubCategory) {
+            return genrateResponse(
+                res,
+                HttpStatus.NotFound,
+                "Product subcategory not found."
+            );
+        }
+
+        if (
+            currentUser?.companyId !== undefined &&
+            Number(currentUser.companyId) !== existingSubCategory.companyId
+        ) {
+            return genrateResponse(
+                res,
+                HttpStatus.Forbidden,
+                "You do not have access to this subcategory."
+            );
+        }
+
+        const deletedBy = currentUser?.userId
+            ? String(currentUser.userId)
+            : data.deletedBy
+                ? String(data.deletedBy)
+                : "SYSTEM";
+
+        const deletedSubCategory = await inventory.productSubCategory.update({
+            where: {
+                id: subCategoryBigId,
+            },
+            data: {
+                isDeleted: true,
+                deletedAt: new Date(),
+                deletedBy: deletedBy,
+                recStatus: 0,
+            },
+        });
+
+        return genrateResponse(
+            res,
+            HttpStatus.OK,
+            "Product subcategory deleted successfully.",
+            encryptData(convertBigIntToString(deletedSubCategory))
+        );
+    } catch (err: any) {
+        console.error(
+            `[${new Date().toISOString()}] Error deleting subcategory:`,
+            err
+        );
+        return genrateResponse(
+            res,
+            err?.status || HttpStatus.BadRequest,
+            err?.message || "Failed to delete product subcategory."
+        );
+    }
+};
+
+/**
+ * Hard Delete Product SubCategory (permanent)
+ */
+export const hardDeleteSubCategory = async (
+    req: AuthenticatedRequest,
+    res: Response
+) => {
+    try {
+        const data = extractPayload(req.body);
+        const currentUser = req?.user as AuthPayload;
+        const subCategoryId = req.params.id || data.id;
+
+        if (!subCategoryId) {
+            return genrateResponse(
+                res,
+                HttpStatus.BadRequest,
+                "Subcategory ID is required for deletion."
+            );
+        }
+
+        const subCategoryBigId = BigInt(subCategoryId);
+
+        const existingSubCategory = await inventory.productSubCategory.findFirst({
+            where: { id: subCategoryBigId },
+        });
+
+        if (!existingSubCategory) {
+            return genrateResponse(
+                res,
+                HttpStatus.NotFound,
+                "Product subcategory not found."
+            );
+        }
+
+        if (
+            currentUser?.companyId !== undefined &&
+            Number(currentUser.companyId) !== existingSubCategory.companyId
+        ) {
+            return genrateResponse(
+                res,
+                HttpStatus.Forbidden,
+                "You do not have access to this subcategory."
+            );
+        }
+
+        const linkedProductCount = await inventory.product.count({
+            where: {
+                subCategoryId: subCategoryBigId,
+                companyId: existingSubCategory.companyId,
+                isDeleted: false,
+            },
+        });
+
+        if (linkedProductCount > 0) {
+            return genrateResponse(
+                res,
+                HttpStatus.BadRequest,
+                "Cannot delete: subcategory still has linked products."
+            );
+        }
+
+        await inventory.productSubCategory.delete({
+            where: { id: subCategoryBigId },
+        });
+
+        return genrateResponse(
+            res,
+            HttpStatus.OK,
+            "Product subcategory permanently deleted."
+        );
+    } catch (err: any) {
+        console.error(
+            `[${new Date().toISOString()}] Error hard-deleting subcategory:`,
+            err
+        );
+        return genrateResponse(
+            res,
+            err?.status || HttpStatus.BadRequest,
+            err?.message || "Failed to permanently delete product subcategory."
+        );
+    }
+};
+
+/**
+ * Bulk Hard Delete Product SubCategories
+ */
+export const bulkDeleteSubCategories = async (
+    req: AuthenticatedRequest,
+    res: Response
+) => {
+    try {
+        const data = extractPayload(req.body);
+        const currentUser = req?.user as AuthPayload;
+        const ids: (string | number)[] = Array.isArray(data.ids) ? data.ids : [];
+
+        if (!ids.length) {
+            return genrateResponse(
+                res,
+                HttpStatus.BadRequest,
+                "ids must be a non-empty array."
+            );
+        }
+
+        let bigIntIds: bigint[];
+        try {
+            bigIntIds = ids.map((id) => BigInt(id));
+        } catch {
+            return genrateResponse(
+                res,
+                HttpStatus.BadRequest,
+                "One or more subcategory ids are invalid."
+            );
+        }
+
+        const subCategories = await inventory.productSubCategory.findMany({
+            where: { id: { in: bigIntIds } },
+        });
+
+        if (
+            currentUser?.companyId !== undefined &&
+            subCategories.some((sc) => sc.companyId !== Number(currentUser.companyId))
+        ) {
+            return genrateResponse(
+                res,
+                HttpStatus.Forbidden,
+                "You do not have access to one or more of these subcategories."
+            );
+        }
+
+        const deletable: bigint[] = [];
+        const skipped: string[] = [];
+
+        for (const subCat of subCategories) {
+            const linkedProductCount = await inventory.product.count({
+                where: {
+                    subCategoryId: subCat.id,
+                    companyId: subCat.companyId,
+                    isDeleted: false,
+                },
+            });
+
+            if (linkedProductCount > 0) {
+                skipped.push(subCat.id.toString());
+            } else {
+                deletable.push(subCat.id);
+            }
+        }
+
+        if (deletable.length) {
+            await inventory.productSubCategory.deleteMany({
+                where: { id: { in: deletable } },
+            });
+        }
+
+        return genrateResponse(
+            res,
+            HttpStatus.OK,
+            "Bulk delete completed.",
+            encryptData({
+                deletedCount: deletable.length,
+                skipped,
+            })
+        );
+    } catch (err: any) {
+        console.error(
+            `[${new Date().toISOString()}] Error bulk-deleting subcategories:`,
+            err
+        );
+        return genrateResponse(
+            res,
+            err?.status || HttpStatus.BadRequest,
+            err?.message || "Failed to bulk delete product subcategories."
         );
     }
 };

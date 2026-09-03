@@ -19,13 +19,8 @@ model ProductCategory {
   companyId      Int
   name           String
   code           String?
-  demoSeedId     String?
   description    String?
-  isDemo         Boolean? @default(false)
-  order          Int?
-  parentCategory Int?
-  searchName     String?
-  status         String?
+  isActive       Boolean @default(true)
 
   createdAt DateTime? @default(now()) @db.Timestamptz
   createdBy String
@@ -37,9 +32,40 @@ model ProductCategory {
   updatedBy String?
   recStatus Int       @default(1)
 
-  products Product[]
+  products      Product[]
+  subCategories ProductSubCategory[]
 
   @@map("product_categories")
+  @@schema("inventory")
+}
+
+// ======================================================
+// PRODUCT SUB CATEGORY
+// ======================================================
+
+model ProductSubCategory {
+  id          BigInt   @id @default(autoincrement())
+  companyId   Int
+  categoryId  BigInt
+  name        String
+  description String?
+  isActive       Boolean @default(true)
+  createdAt DateTime? @default(now()) @db.Timestamptz
+  createdBy String
+  groupId   String?
+  isDeleted Boolean?  @default(false)
+  deletedAt DateTime? @db.Timestamptz
+  deletedBy String?
+  updatedAt DateTime? @updatedAt @db.Timestamptz
+  updatedBy String?
+  recStatus Int       @default(1)
+
+  categoryMaster ProductCategory @relation(fields: [categoryId], references: [id])
+  products       Product[]
+
+  @@index([companyId])
+  @@index([categoryId])
+  @@map("product_sub_categories")
   @@schema("inventory")
 }
 
@@ -50,17 +76,14 @@ model ProductCategory {
 model Product {
   id                BigInt   @id @default(autoincrement())
   companyId         Int
-  category          String?
   name              String
   price             Decimal?
   categoryId        BigInt?
-  company           String?
+  subCategoryId     BigInt?
   cost              Decimal?
-  demoSeedId        String?
   description       String?
   discount          Decimal?
   hsn               String?
-  isDemo            Boolean? @default(false)
   lowStockThreshold Decimal?
   mrp               Decimal?
   photos            Json?
@@ -71,7 +94,7 @@ model Product {
   tax               Decimal?
   trackingType      String?
   unit              String?
-
+  isActive       Boolean @default(true)
   createdAt DateTime  @default(now()) @db.Timestamptz
   createdBy String
   groupId   String?
@@ -82,13 +105,15 @@ model Product {
   updatedBy String?
   recStatus Int       @default(1)
 
-  categoryMaster     ProductCategory? @relation(fields: [categoryId], references: [id])
+  categoryMaster    ProductCategory?    @relation(fields: [categoryId], references: [id])
+  subCategoryMaster ProductSubCategory? @relation(fields: [subCategoryId], references: [id])
 
   stocks       Stock[]
   stockLedgers StockLedger[]
 
   @@index([companyId])
   @@index([categoryId])
+  @@index([subCategoryId])
   @@index([sku])
   @@map("products")
   @@schema("inventory")
