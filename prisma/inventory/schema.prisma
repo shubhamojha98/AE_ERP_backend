@@ -1,6 +1,6 @@
 generator client {
   provider = "prisma-client-js"
- output   = "../../generated/inventory"
+  output   = "../../generated/inventory"
 }
 
 datasource db {
@@ -15,9 +15,9 @@ datasource db {
 // ======================================================
 
 model ProductCategory {
-  id             BigInt   @id @default(autoincrement())
+  id             Int   @id @default(autoincrement())
   companyId      Int
-  name           String
+  categoryName   String
   code           String?
   description    String?
   isActive       Boolean @default(true)
@@ -33,39 +33,8 @@ model ProductCategory {
   recStatus Int       @default(1)
 
   products      Product[]
-  subCategories ProductSubCategory[]
 
   @@map("product_categories")
-  @@schema("inventory")
-}
-
-// ======================================================
-// PRODUCT SUB CATEGORY
-// ======================================================
-
-model ProductSubCategory {
-  id          BigInt   @id @default(autoincrement())
-  companyId   Int
-  categoryId  BigInt
-  name        String
-  description String?
-  isActive       Boolean @default(true)
-  createdAt DateTime? @default(now()) @db.Timestamptz
-  createdBy String
-  groupId   String?
-  isDeleted Boolean?  @default(false)
-  deletedAt DateTime? @db.Timestamptz
-  deletedBy String?
-  updatedAt DateTime? @updatedAt @db.Timestamptz
-  updatedBy String?
-  recStatus Int       @default(1)
-
-  categoryMaster ProductCategory @relation(fields: [categoryId], references: [id])
-  products       Product[]
-
-  @@index([companyId])
-  @@index([categoryId])
-  @@map("product_sub_categories")
   @@schema("inventory")
 }
 
@@ -74,47 +43,43 @@ model ProductSubCategory {
 // ======================================================
 
 model Product {
-  id                BigInt   @id @default(autoincrement())
-  companyId         Int
-  name              String
-  price             Decimal?
-  categoryId        BigInt?
-  subCategoryId     BigInt?
-  cost              Decimal?
-  description       String?
-  discount          Decimal?
-  hsn               String?
-  lowStockThreshold Decimal?
-  mrp               Decimal?
-  photos            Json?
-  searchName        String?
-  sku               String?
-  specs             Json?
-  status            String?
-  tax               Decimal?
-  trackingType      String?
-  unit              String?
-  isActive       Boolean @default(true)
+  id        BigInt @id @default(autoincrement())
+  companyId Int
+  productName     String
+  sku      String
+  unit     String
+  hsn      String
+  productPrice    Decimal @db.Decimal(15, 2)
+  gstRate  Decimal @db.Decimal(5, 2)
+  categoryId Int
+  description String?
+  photo       String?
+  status   String?
+  isActive Boolean @default(true)
   createdAt DateTime  @default(now()) @db.Timestamptz
   createdBy String
   groupId   String?
-  isDeleted Boolean?  @default(false)
+
+  isDeleted Boolean   @default(false)
   deletedAt DateTime? @db.Timestamptz
   deletedBy String?
+
   updatedAt DateTime? @updatedAt @db.Timestamptz
   updatedBy String?
-  recStatus Int       @default(1)
 
-  categoryMaster    ProductCategory?    @relation(fields: [categoryId], references: [id])
-  subCategoryMaster ProductSubCategory? @relation(fields: [subCategoryId], references: [id])
+  recStatus Int @default(1)
+
+  categoryMaster ProductCategory? @relation(fields: [categoryId], references: [id])
 
   stocks       Stock[]
   stockLedgers StockLedger[]
 
+  @@unique([companyId, sku])
   @@index([companyId])
   @@index([categoryId])
-  @@index([subCategoryId])
+  @@index([productName])
   @@index([sku])
+
   @@map("products")
   @@schema("inventory")
 }
@@ -124,42 +89,43 @@ model Product {
 // ======================================================
 
 model Warehouse {
-  id                   BigInt   @id @default(autoincrement())
-  companyId            Int
-  name                 String
-  status               String?
-  address              String?
-  capacity             Decimal?
-  city                 String?
-  code                 String?
-  demoSeedId           String?
-  geofenceRadiusMeters Decimal?
-  isDemo               Boolean? @default(false)
-  latitude             Decimal?
-  longitude            Decimal?
-  managerName          String?
-  managerPhone         String?
-  notes                String?
-  pincode              String?
-  searchName           String?
-  state                String?
-
+  id        Int @id @default(autoincrement())
+  companyId Int
+  warehouseName     String
+  warehouseLocation String
+  capacity Decimal @db.Decimal(15, 2)
+  address String?
+  city    String?
+  state   String?
+  pincode String?
+  code   String?
+  latitude  Decimal? @db.Decimal(10, 7)
+  longitude Decimal? @db.Decimal(10, 7)
+  managerName  String?
+  managerPhone String?
+  isActive Boolean @default(true)
   createdAt DateTime  @default(now()) @db.Timestamptz
   createdBy String
   groupId   String?
-  isDeleted Boolean?  @default(false)
+
+  isDeleted Boolean   @default(false)
   deletedAt DateTime? @db.Timestamptz
   deletedBy String?
+
   updatedAt DateTime? @updatedAt @db.Timestamptz
   updatedBy String?
-  recStatus Int       @default(1)
 
+  recStatus Int @default(1)
+
+  // Relations
   stocks       Stock[]
   stockLedgers StockLedger[]
   dispatches   Dispatch[]
 
   @@index([companyId])
-  @@index([code])
+  @@index([warehouseName])
+  @@index([warehouseLocation])
+
   @@map("warehouses")
   @@schema("inventory")
 }
@@ -169,33 +135,27 @@ model Warehouse {
 // ======================================================
 
 model Stock {
-  id           BigInt   @id @default(autoincrement())
-  companyId    Int
-  availableQty Decimal
-  productId    BigInt
-  reservedQty  Decimal
-  warehouseId  BigInt
+  id          Int @id @default(autoincrement())
+  companyId   Int
 
-  demoSeedId   String?
-  isDemo       Boolean? @default(false)
-  onHandQty    Decimal?
-  reorderLevel Decimal?
-  stockId      String?
-  unit         String?
+  productId   Int
+  warehouseId Int
 
-  createdAt DateTime  @default(now()) @db.Timestamptz
+  availableQty Decimal @default(0) @db.Decimal(15, 3)
+  reservedQty  Decimal @default(0) @db.Decimal(15, 3)
+
+  createdAt DateTime @default(now())
   createdBy String
-  groupId   String?
-  isDeleted Boolean?  @default(false)
-  deletedAt DateTime? @db.Timestamptz
-  deletedBy String?
-  updatedAt DateTime? @updatedAt @db.Timestamptz
+
+  updatedAt DateTime? @updatedAt
   updatedBy String?
-  recStatus Int       @default(1)
 
-  product        Product   @relation(fields: [productId], references: [id])
+  isDeleted Boolean @default(false)
+  deletedAt DateTime?
+  deletedBy String?
 
-  warehouse      Warehouse @relation(fields: [warehouseId], references: [id])
+  product   Product   @relation(fields: [productId], references: [id])
+  warehouse Warehouse @relation(fields: [warehouseId], references: [id])
 
   @@unique([productId, warehouseId])
   @@index([companyId])
@@ -204,13 +164,12 @@ model Stock {
   @@map("stock")
   @@schema("inventory")
 }
-
 // ======================================================
 // STOCK LEDGER
 // ======================================================
 
 model StockLedger {
-  id        BigInt   @id @default(autoincrement())
+  id        Int   @id @default(autoincrement())
   companyId Int
 
   afterQty   Decimal
@@ -222,7 +181,7 @@ model StockLedger {
   transactionId String
   type          String
 
-  warehouseId BigInt
+  warehouseId Int
 
   balanceAfter  Decimal?
   date          String?
