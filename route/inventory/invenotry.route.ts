@@ -1,16 +1,21 @@
 import { Router } from "express";
-import productRoute from "./product/product.route";
-// import stockRoute from "./stock/stock.route";
-// import categoryRoute from "./category/category.route";
-// import supplierRoute from "./supplier/supplier.route";
+import { createCategory,getCategoryList,updateCategory,deleteCategory,getCategoryById } from "../../controller/inventory/productCategory.controller";
+import { createProduct,getProductList,updateProduct,deleteProduct,getProductById } from "../../controller/inventory/product.controller";
 
 const router = Router();
 
+// Category
+router.post("/category", createCategory);
+router.get("/category", getCategoryList);
+router.get("/category/:id", getCategoryById);
+router.put("/category/:id", updateCategory);
+router.delete("/category/:id", deleteCategory);
 
-router.use("/product", productRoute);
-// router.use("/stock", stockRoute);
-// router.use("/category", categoryRoute);
-// router.use("/supplier", supplierRoute);
-
+// Product
+router.post("/product", createProduct);
+router.get("/product", getProductList);
+router.get("/product/:id", getProductById);
+router.put("/product/:id", updateProduct);
+router.delete("/product/:id", deleteProduct);
 
 export default router;

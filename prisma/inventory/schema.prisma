@@ -25,9 +25,6 @@ model ProductCategory {
   createdAt DateTime? @default(now()) @db.Timestamptz
   createdBy String
   groupId   String?
-  isDeleted Boolean?  @default(false)
-  deletedAt DateTime? @db.Timestamptz
-  deletedBy String?
   updatedAt DateTime? @updatedAt @db.Timestamptz
   updatedBy String?
   recStatus Int       @default(1)
@@ -59,10 +56,6 @@ model Product {
   createdAt DateTime  @default(now()) @db.Timestamptz
   createdBy String
   groupId   String?
-
-  isDeleted Boolean   @default(false)
-  deletedAt DateTime? @db.Timestamptz
-  deletedBy String?
 
   updatedAt DateTime? @updatedAt @db.Timestamptz
   updatedBy String?
@@ -107,11 +100,6 @@ model Warehouse {
   createdAt DateTime  @default(now()) @db.Timestamptz
   createdBy String
   groupId   String?
-
-  isDeleted Boolean   @default(false)
-  deletedAt DateTime? @db.Timestamptz
-  deletedBy String?
-
   updatedAt DateTime? @updatedAt @db.Timestamptz
   updatedBy String?
 
@@ -149,10 +137,6 @@ model Stock {
 
   updatedAt DateTime? @updatedAt
   updatedBy String?
-
-  isDeleted Boolean @default(false)
-  deletedAt DateTime?
-  deletedBy String?
 
   product   Product   @relation(fields: [productId], references: [id])
   warehouse Warehouse @relation(fields: [warehouseId], references: [id])
@@ -202,9 +186,6 @@ model StockLedger {
   createdAt DateTime  @default(now()) @db.Timestamptz
   createdBy String
   groupId   String?
-  isDeleted Boolean?  @default(false)
-  deletedAt DateTime? @db.Timestamptz
-  deletedBy String?
   updatedAt DateTime? @updatedAt @db.Timestamptz
   updatedBy String?
   recStatus Int       @default(1)
@@ -280,9 +261,6 @@ model Dispatch {
   createdAt DateTime  @default(now()) @db.Timestamptz
   createdBy String
   groupId   String?
-  isDeleted Boolean?  @default(false)
-  deletedAt DateTime? @db.Timestamptz
-  deletedBy String?
   updatedAt DateTime? @updatedAt @db.Timestamptz
   updatedBy String?
   recStatus Int       @default(1)
