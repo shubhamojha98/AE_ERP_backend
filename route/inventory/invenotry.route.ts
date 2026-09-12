@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { createCategory,getCategoryList,updateCategory,deleteCategory,getCategoryById } from "../../controller/inventory/productCategory.controller";
 import { createProduct,getProductList,updateProduct,deleteProduct,getProductById } from "../../controller/inventory/product.controller";
+import { createWarehouse, getWarehouseList, getWarehouseById, updateWarehouse, deleteWarehouse } from "../../controller/inventory/warehouse.controller";
 
 const router = Router();
 
@@ -17,5 +18,12 @@ router.get("/product", getProductList);
 router.get("/product/:id", getProductById);
 router.put("/product/:id", updateProduct);
 router.delete("/product/:id", deleteProduct);
+
+// Warehouse
+router.post("/warehouse", createWarehouse);
+router.get("/warehouse", getWarehouseList);
+router.get("/warehouse/:id", getWarehouseById);
+router.put("/warehouse/:id", updateWarehouse);
+router.delete("/warehouse/:id", deleteWarehouse);
 
 export default router;
