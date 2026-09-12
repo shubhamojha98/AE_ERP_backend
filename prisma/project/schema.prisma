@@ -1,0 +1,87 @@
+generator client {
+    provider = "prisma-client-js"
+    output   = "../../generated/project"
+}
+
+datasource db {
+    provider = "postgresql"
+    url      = env("DATABASE_NEOZY")
+}
+
+enum ProjectStage {
+    QUOTATION
+    SURVEY
+    SERVICE
+    HANDOVER
+    SUBSIDY
+    NET_METERING
+}
+
+enum ProjectStatus {
+    ACTIVE
+    COMPLETED
+    CANCELLED
+    ARCHIVED
+}
+
+model Customer {
+    id           Int    @id @default(autoincrement())
+    customerCode String @unique
+
+    name  String
+    phone String  @unique
+    email String?
+
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+    recStatus Int      @default(1)
+
+    projects Project[]
+
+    @@index([name])
+    @@index([phone])
+}
+
+model Project {
+    id          Int      @id @default(autoincrement())
+    projectCode String   @unique
+    customerId  Int
+    customer    Customer @relation(fields: [customerId], references: [id])
+
+    leadId         String?
+    capacityKw     Decimal       @db.Decimal(10, 2)
+    projectType    String
+    stage          ProjectStage  @default(QUOTATION)
+    status         ProjectStatus @default(ACTIVE)
+    salesOwnerId   Int?
+    salesOwnerName String?
+    surveyorId     Int?
+    surveyorName   String?
+    installerId    Int?
+    installerName  String?
+    managerId      Int?
+    managerName    String?
+    addressLine1   String?
+    addressLine2   String?
+    landmark       String?
+    city           String?
+    district       String?
+    state          String?
+    pincode        String?
+    country        String        @default("India")
+    notes          String?
+    createdById    Int
+    updatedById    Int?
+    createdAt      DateTime      @default(now())
+    updatedAt      DateTime      @updatedAt
+    recStatus      Int           @default(1)
+
+    @@index([customerId])
+    @@index([stage])
+    @@index([status])
+    @@index([salesOwnerId])
+    @@index([surveyorId])
+    @@index([installerId])
+    @@index([managerId])
+    @@index([createdAt])
+}
