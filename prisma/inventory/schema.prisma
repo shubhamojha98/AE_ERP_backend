@@ -65,7 +65,6 @@ model Product {
   categoryMaster ProductCategory? @relation(fields: [categoryId], references: [id])
 
   stocks       Stock[]
-  stockLedgers StockLedger[]
 
   @@unique([companyId, sku])
   @@index([companyId])
@@ -107,9 +106,6 @@ model Warehouse {
 
   // Relations
   stocks       Stock[]
-  stockLedgers StockLedger[]
-  dispatches   Dispatch[]
-
   @@index([companyId])
   @@index([warehouseName])
   @@index([warehouseLocation])
@@ -126,7 +122,7 @@ model Stock {
   id          Int @id @default(autoincrement())
   companyId   Int
 
-  productId   Int
+  productId   BigInt
   warehouseId Int
 
   availableQty Decimal @default(0) @db.Decimal(15, 3)
@@ -146,131 +142,5 @@ model Stock {
   @@index([productId])
   @@index([warehouseId])
   @@map("stock")
-  @@schema("inventory")
-}
-// ======================================================
-// STOCK LEDGER
-// ======================================================
-
-model StockLedger {
-  id        Int   @id @default(autoincrement())
-  companyId Int
-
-  afterQty   Decimal
-  beforeQty  Decimal
-  movementAt DateTime
-
-  productId     BigInt
-  qty           Decimal
-  transactionId String
-  type          String
-
-  warehouseId Int
-
-  balanceAfter  Decimal?
-  date          String?
-  demoSeedId    String?
-  direction     String?
-  isDemo        Boolean? @default(false)
-  ledgerId      String?
-  movementType  String?
-  notes         String?
-  product       String?
-  referenceId   String?
-  referenceType String?
-  sourceId      String?
-  sourceType    String?
-  unit          String?
-  warehouse     String?
-
-  createdAt DateTime  @default(now()) @db.Timestamptz
-  createdBy String
-  groupId   String?
-  updatedAt DateTime? @updatedAt @db.Timestamptz
-  updatedBy String?
-  recStatus Int       @default(1)
-
-  productMaster  Product   @relation(fields: [productId], references: [id])
-
-  warehouseMaster Warehouse @relation(fields: [warehouseId], references: [id])
-
-  @@index([companyId])
-  @@index([productId])
-  @@index([warehouseId])
-  @@index([transactionId])
-  @@index([movementAt])
-  @@map("stock_ledger")
-  @@schema("inventory")
-}
-
-// ======================================================
-// DISPATCH
-// ======================================================
-
-model Dispatch {
-  id          BigInt   @id @default(autoincrement())
-  companyId   Int
-  status      String
-  warehouseId BigInt
-
-  approvalStatus         String?
-  cancellationOrderId    String?
-  cancellationReason     String?
-  closedAt               DateTime?
-  closedBy               String?
-  customer               String?
-  customerId             String?
-  date                   String?
-  deliveredAt            DateTime?
-  deliveredBy            String?
-  deliveryConfirmed      Boolean?
-  deliveryDate           String?
-  deliveryOTPExpiresAt   DateTime?
-  deliveryOTPGeneratedAt DateTime?
-  deliveryOTPHash        String?
-
-  demoSeedId String?
-  isDemo     Boolean? @default(false)
-
-  dispatchDate   String?
-  dispatchedAt   DateTime?
-  dispatchId     String?
-  dispatchNumber String?
-
-  driverName  String?
-  driverPhone String?
-
-  items Json?
-
-  lrNumber String?
-  notes    String?
-  orderId  String?
-
-  paymentReconciliationPending Boolean?
-
-  projectId   String?
-  projectName String?
-
-  returnedAt    DateTime?
-  transporterId String?
-  vehicleNo     String?
-  verifiedBy    String?
-
-  warehouse String?
-
-  createdAt DateTime  @default(now()) @db.Timestamptz
-  createdBy String
-  groupId   String?
-  updatedAt DateTime? @updatedAt @db.Timestamptz
-  updatedBy String?
-  recStatus Int       @default(1)
-
-  warehouseMaster              Warehouse @relation(fields: [warehouseId], references: [id])
-
-  @@index([companyId])
-  @@index([warehouseId])
-  @@index([status])
-  @@index([dispatchNumber])
-  @@map("dispatch")
   @@schema("inventory")
 }

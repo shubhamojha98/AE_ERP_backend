@@ -5,7 +5,6 @@ import genrateResponse from "../../lib/generateResponse";
 import HttpStatus from "../../lib/httpStatus";
 import { extractPayload, encryptData } from "../../lib/apiCryptography";
 import { inventory } from "../../lib/globalprimsaclient";
-import convertBigIntToString from "../../lib/bigIntConversion";
 
 export const createCategory = async (
   req: AuthenticatedRequest,

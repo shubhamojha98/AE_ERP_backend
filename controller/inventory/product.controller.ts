@@ -7,12 +7,9 @@ import { extractPayload, encryptData } from "../../lib/apiCryptography";
 import { inventory } from "../../lib/globalprimsaclient";
 import convertBigIntToString from "../../lib/bigIntConversion";
 
-
-
-
 export const createProduct = async (
   req: AuthenticatedRequest,
-  res: Response
+  res: Response,
 ) => {
   try {
     const data = extractPayload(req.body);
@@ -31,7 +28,7 @@ export const createProduct = async (
       return genrateResponse(
         res,
         HttpStatus.BadRequest,
-        "Required product fields are missing."
+        "Required product fields are missing.",
       );
     }
 
@@ -58,21 +55,18 @@ export const createProduct = async (
       res,
       HttpStatus.OK,
       "Product created successfully.",
-      encryptData(convertBigIntToString(product))
+      encryptData(convertBigIntToString(product)),
     );
   } catch (error: any) {
     return genrateResponse(
       res,
       HttpStatus.BadRequest,
-      error.message || "Failed to create product."
+      error.message || "Failed to create product.",
     );
   }
 };
 
-export const getProductList = async (
-  req: Request,
-  res: Response
-) => {
+export const getProductList = async (req: Request, res: Response) => {
   try {
     const { companyId, categoryId, search } = req.query;
 
@@ -148,21 +142,18 @@ export const getProductList = async (
           total,
           totalPages: Math.ceil(total / limit),
         },
-      })
+      }),
     );
   } catch (error: any) {
     return genrateResponse(
       res,
       HttpStatus.BadRequest,
-      error.message || "Failed to fetch products."
+      error.message || "Failed to fetch products.",
     );
   }
 };
 
-export const getProductById = async (
-  req: Request,
-  res: Response
-) => {
+export const getProductById = async (req: Request, res: Response) => {
   try {
     const product = await inventory.product.findUnique({
       where: {
@@ -174,31 +165,27 @@ export const getProductById = async (
     });
 
     if (!product || product.recStatus !== 1) {
-      return genrateResponse(
-        res,
-        HttpStatus.NotFound,
-        "Product not found."
-      );
+      return genrateResponse(res, HttpStatus.NotFound, "Product not found.");
     }
 
     return genrateResponse(
       res,
       HttpStatus.OK,
       "Product fetched successfully.",
-      encryptData(convertBigIntToString(product))
+      encryptData(convertBigIntToString(product)),
     );
   } catch (error: any) {
     return genrateResponse(
       res,
       HttpStatus.BadRequest,
-      error.message || "Failed to fetch product."
+      error.message || "Failed to fetch product.",
     );
   }
 };
 
 export const updateProduct = async (
   req: AuthenticatedRequest,
-  res: Response
+  res: Response,
 ) => {
   try {
     const data = extractPayload(req.body);
@@ -266,21 +253,18 @@ export const updateProduct = async (
       res,
       HttpStatus.OK,
       "Product updated successfully.",
-      encryptData(convertBigIntToString(product))
+      encryptData(convertBigIntToString(product)),
     );
   } catch (error: any) {
     return genrateResponse(
       res,
       HttpStatus.BadRequest,
-      error.message || "Failed to update product."
+      error.message || "Failed to update product.",
     );
   }
 };
 
-export const deleteProduct = async (
-  req: Request,
-  res: Response
-) => {
+export const deleteProduct = async (req: Request, res: Response) => {
   try {
     const product = await inventory.product.update({
       where: {
@@ -295,13 +279,13 @@ export const deleteProduct = async (
       res,
       HttpStatus.OK,
       "Product deleted successfully.",
-      encryptData(convertBigIntToString(product))
+      encryptData(convertBigIntToString(product)),
     );
   } catch (error: any) {
     return genrateResponse(
       res,
       HttpStatus.BadRequest,
-      error.message || "Failed to delete product."
+      error.message || "Failed to delete product.",
     );
   }
 };
