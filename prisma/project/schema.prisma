@@ -23,6 +23,19 @@ enum ProjectStatus {
     CANCELLED
     ARCHIVED
 }
+enum SurveyStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum EngineeringStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
 
 model Customer {
     id           Int    @id @default(autoincrement())
@@ -76,6 +89,9 @@ model Project {
     updatedAt      DateTime      @updatedAt
     recStatus      Int           @default(1)
 
+
+     surveys Survey[]
+
     @@index([customerId])
     @@index([stage])
     @@index([status])
@@ -85,3 +101,49 @@ model Project {
     @@index([managerId])
     @@index([createdAt])
 }
+
+model Survey {
+  id Int @id @default(autoincrement())
+  surveyId String @unique
+  projectId Int
+  project   Project @relation(fields: [projectId], references: [id])
+
+  scheduledDate DateTime?
+  surveyorId    Int?
+  status        SurveyStatus @default(PENDING)
+  notes         String?
+
+  // Engineering can be added later
+  engineering EngineeringDesign?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  recStatus Int      @default(1)
+
+  @@index([projectId])
+  @@index([status])
+}
+
+model EngineeringDesign {
+  id Int @id @default(autoincrement())
+  designId String @unique
+  // Engineering belongs to a Survey
+  surveyId Int @unique
+  // Keep projectId if you frequently query engineering by project
+//   projectId Int
+  capacityKw Decimal? @db.Decimal(10, 2)
+  designerId Int?
+  status     EngineeringStatus @default(PENDING)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  recStatus Int      @default(1)
+
+   survey   Survey @relation(fields: [surveyId], references: [id])
+//    project   Project @relation(fields: [projectId], references: [id])
+
+  @@index([surveyId])
+//   @@index([projectId])
+  @@index([status])
+}
+
