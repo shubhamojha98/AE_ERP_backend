@@ -1,33 +1,42 @@
 generator client {
-    provider = "prisma-client-js"
-    output   = "../../generated/project"
+  provider = "prisma-client-js"
+  output   = "../../generated/project"
 }
 
 datasource db {
-    provider = "postgresql"
-    url      = env("DATABASE_NEOZY")
+  provider = "postgresql"
+  url      = env("DATABASE_URL_PROJECT")
+
+  schemas = ["project"]
 }
 
 enum ProjectStage {
-    QUOTATION
-    SURVEY
-    SERVICE
-    HANDOVER
-    SUBSIDY
-    NET_METERING
+  QUOTATION
+  SURVEY
+  SERVICE
+  HANDOVER
+  SUBSIDY
+  NET_METERING
+
+  @@schema("project")
 }
 
 enum ProjectStatus {
-    ACTIVE
-    COMPLETED
-    CANCELLED
-    ARCHIVED
+  ACTIVE
+  COMPLETED
+  CANCELLED
+  ARCHIVED
+
+  @@schema("project")
 }
+
 enum SurveyStatus {
   PENDING
   IN_PROGRESS
   COMPLETED
   CANCELLED
+
+  @@schema("project")
 }
 
 enum EngineeringStatus {
@@ -35,76 +44,80 @@ enum EngineeringStatus {
   IN_PROGRESS
   COMPLETED
   CANCELLED
+
+  @@schema("project")
 }
 
 model Customer {
-    id           Int    @id @default(autoincrement())
-    customerCode String @unique
+  id           Int    @id @default(autoincrement())
+  customerCode String @unique
 
-    name  String
-    phone String  @unique
-    email String?
+  customerName  String
+  customerPhone String  @unique
+  customerEmail String?
 
-    createdAt DateTime @default(now())
-    updatedAt DateTime @updatedAt
-    recStatus Int      @default(1)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  recStatus Int      @default(1)
 
-    projects Project[]
+  projects Project[]
 
-    @@index([name])
-    @@index([phone])
+  @@index([customerName])
+  @@index([customerPhone])
+  @@schema("project")
 }
 
 model Project {
-    id          Int      @id @default(autoincrement())
-    projectCode String   @unique
-    customerId  Int
-    customer    Customer @relation(fields: [customerId], references: [id])
+  id          Int      @id @default(autoincrement())
+  projectCode String   @unique
+  customerId  Int
+  customer    Customer @relation(fields: [customerId], references: [id])
 
-    leadId         String?
-    capacityKw     Decimal       @db.Decimal(10, 2)
-    projectType    String
-    stage          ProjectStage  @default(QUOTATION)
-    status         ProjectStatus @default(ACTIVE)
-    salesOwnerId   Int?
-    salesOwnerName String?
-    surveyorId     Int?
-    surveyorName   String?
-    installerId    Int?
-    installerName  String?
-    managerId      Int?
-    managerName    String?
-    addressLine1   String?
-    addressLine2   String?
-    landmark       String?
-    city           String?
-    district       String?
-    state          String?
-    pincode        String?
-    country        String        @default("India")
-    notes          String?
-    createdById    Int
-    updatedById    Int?
-    createdAt      DateTime      @default(now())
-    updatedAt      DateTime      @updatedAt
-    recStatus      Int           @default(1)
+  leadId         String?
+  capacityKw     Decimal       @db.Decimal(10, 2)
+  projectType    String
+  stage          ProjectStage  @default(QUOTATION)
+  status         ProjectStatus @default(ACTIVE)
+  salesOwnerId   Int?
+  salesOwnerName String?
+  surveyorId     Int?
+  surveyorName   String?
+  installerId    Int?
+  installerName  String?
+  managerId      Int?
+  managerName    String?
+  addressLine1   String?
+  addressLine2   String?
+  landmark       String?
+  city           String?
+  district       String?
+  state          String?
+  pincode        String?
+  country        String        @default("India")
+  notes          String?
+  groupId        String?
+  createdById    Int
+  updatedById    Int?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  recStatus      Int           @default(1)
 
+  surveys Survey[]
 
-     surveys Survey[]
-
-    @@index([customerId])
-    @@index([stage])
-    @@index([status])
-    @@index([salesOwnerId])
-    @@index([surveyorId])
-    @@index([installerId])
-    @@index([managerId])
-    @@index([createdAt])
+  @@index([customerId])
+  @@index([stage])
+  @@index([status])
+  @@index([salesOwnerId])
+  @@index([surveyorId])
+  @@index([installerId])
+  @@index([managerId])
+  @@index([createdAt])
+  @@schema("project")
 }
 
 model Survey {
-  id Int @id @default(autoincrement())
-  surveyId String @unique
+  id        Int     @id @default(autoincrement())
+  surveyId  String  @unique
   projectId Int
   project   Project @relation(fields: [projectId], references: [id])
 
@@ -116,34 +129,39 @@ model Survey {
   // Engineering can be added later
   engineering EngineeringDesign?
 
+  groupId String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   recStatus Int      @default(1)
 
   @@index([projectId])
   @@index([status])
+  @@schema("project")
 }
 
 model EngineeringDesign {
-  id Int @id @default(autoincrement())
-  designId String @unique
+  id         Int               @id @default(autoincrement())
+  designId   String            @unique
   // Engineering belongs to a Survey
-  surveyId Int @unique
+  surveyId   Int               @unique
   // Keep projectId if you frequently query engineering by project
-//   projectId Int
-  capacityKw Decimal? @db.Decimal(10, 2)
+  //   projectId Int
+  capacityKw Decimal?          @db.Decimal(10, 2)
   designerId Int?
   status     EngineeringStatus @default(PENDING)
+
+  groupId String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   recStatus Int      @default(1)
 
-   survey   Survey @relation(fields: [surveyId], references: [id])
-//    project   Project @relation(fields: [projectId], references: [id])
+  survey Survey @relation(fields: [surveyId], references: [id])
+  //    project   Project @relation(fields: [projectId], references: [id])
 
   @@index([surveyId])
-//   @@index([projectId])
+  //   @@index([projectId])
   @@index([status])
+  @@schema("project")
 }
-

@@ -5,9 +5,9 @@ generator client {
 
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_NEOZY")
+  url      = env("DATABASE_URL_INVENTORY")
 
-  schemas = ["inventory"]
+  // schemas = ["inventory"]
 }
 
 // ======================================================
@@ -15,12 +15,12 @@ datasource db {
 // ======================================================
 
 model ProductCategory {
-  id             Int   @id @default(autoincrement())
-  companyId      Int
-  categoryName   String
-  code           String?
-  description    String?
-  isActive       Boolean @default(true)
+  id           Int     @id @default(autoincrement())
+  companyId    Int
+  categoryName String
+  code         String?
+  description  String?
+  isActive     Boolean @default(true)
 
   createdAt DateTime? @default(now()) @db.Timestamptz
   createdBy String
@@ -29,10 +29,10 @@ model ProductCategory {
   updatedBy String?
   recStatus Int       @default(1)
 
-  products      Product[]
+  products Product[]
 
   @@map("product_categories")
-  @@schema("inventory")
+  // @@schema("inventory")
 }
 
 // ======================================================
@@ -40,22 +40,22 @@ model ProductCategory {
 // ======================================================
 
 model Product {
-  id        BigInt @id @default(autoincrement())
-  companyId Int
-  productName     String
-  sku      String
-  unit     String
-  hsn      String
-  productPrice    Decimal @db.Decimal(15, 2)
-  gstRate  Decimal @db.Decimal(5, 2)
-  categoryId Int
-  description String?
-  photo       String?
-  status   String?
-  isActive Boolean @default(true)
-  createdAt DateTime  @default(now()) @db.Timestamptz
-  createdBy String
-  groupId   String?
+  id           BigInt   @id @default(autoincrement())
+  companyId    Int
+  productName  String
+  sku          String
+  unit         String
+  hsn          String
+  productPrice Decimal  @db.Decimal(15, 2)
+  gstRate      Decimal  @db.Decimal(5, 2)
+  categoryId   Int
+  description  String?
+  photo        String?
+  status       String?
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now()) @db.Timestamptz
+  createdBy    String
+  groupId      String?
 
   updatedAt DateTime? @updatedAt @db.Timestamptz
   updatedBy String?
@@ -64,16 +64,15 @@ model Product {
 
   categoryMaster ProductCategory? @relation(fields: [categoryId], references: [id])
 
-  stocks       Stock[]
+  stocks Stock[]
 
   @@unique([companyId, sku])
   @@index([companyId])
   @@index([categoryId])
   @@index([productName])
   @@index([sku])
-
   @@map("products")
-  @@schema("inventory")
+  // @@schema("inventory")
 }
 
 // ======================================================
@@ -81,37 +80,37 @@ model Product {
 // ======================================================
 
 model Warehouse {
-  id        Int @id @default(autoincrement())
-  companyId Int
+  id                Int       @id @default(autoincrement())
+  companyId         Int
   warehouseName     String
   warehouseLocation String
-  capacity Decimal @db.Decimal(15, 2)
-  address String?
-  city    String?
-  state   String?
-  pincode String?
-  code   String?
-  latitude  Decimal? @db.Decimal(10, 7)
-  longitude Decimal? @db.Decimal(10, 7)
-  managerName  String?
-  managerPhone String?
-  isActive Boolean @default(true)
-  createdAt DateTime  @default(now()) @db.Timestamptz
-  createdBy String
-  groupId   String?
-  updatedAt DateTime? @updatedAt @db.Timestamptz
-  updatedBy String?
+  capacity          Decimal   @db.Decimal(15, 2)
+  address           String?
+  city              String?
+  state             String?
+  pincode           String?
+  code              String?
+  latitude          Decimal?  @db.Decimal(10, 7)
+  longitude         Decimal?  @db.Decimal(10, 7)
+  managerName       String?
+  managerPhone      String?
+  isActive          Boolean   @default(true)
+  createdAt         DateTime  @default(now()) @db.Timestamptz
+  createdBy         String
+  groupId           String?
+  updatedAt         DateTime? @updatedAt @db.Timestamptz
+  updatedBy         String?
 
   recStatus Int @default(1)
 
   // Relations
-  stocks       Stock[]
+  stocks Stock[]
+
   @@index([companyId])
   @@index([warehouseName])
   @@index([warehouseLocation])
-
   @@map("warehouses")
-  @@schema("inventory")
+  // @@schema("inventory")
 }
 
 // ======================================================
@@ -119,8 +118,8 @@ model Warehouse {
 // ======================================================
 
 model Stock {
-  id          Int @id @default(autoincrement())
-  companyId   Int
+  id        Int @id @default(autoincrement())
+  companyId Int
 
   productId   BigInt
   warehouseId Int
@@ -142,5 +141,5 @@ model Stock {
   @@index([productId])
   @@index([warehouseId])
   @@map("stock")
-  @@schema("inventory")
+  // @@schema("inventory")
 }

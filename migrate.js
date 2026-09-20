@@ -1,7 +1,8 @@
 const { execSync } = require("child_process");
 
 const schemas = [
-    "prisma/inventory/schema.prisma"
+    "prisma/inventory/schema.prisma",
+    "prisma/project/schema.prisma"
 ]
 
 schemas.forEach((schema) => {
