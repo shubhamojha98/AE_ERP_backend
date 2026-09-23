@@ -50,14 +50,19 @@ enum EngineeringStatus {
 
 model Customer {
   id           Int    @id @default(autoincrement())
+  companyId    Int
   customerCode String @unique
 
   customerName  String
   customerPhone String  @unique
   customerEmail String?
+  customerType  String?
 
   createdAt DateTime @default(now())
+  createdBy Int
   updatedAt DateTime @updatedAt
+  updatedBy Int?
+  groupId   String?
   recStatus Int      @default(1)
 
   projects Project[]
@@ -69,6 +74,7 @@ model Customer {
 
 model Project {
   id          Int      @id @default(autoincrement())
+  companyId   Int
   projectCode String   @unique
   customerId  Int
   customer    Customer @relation(fields: [customerId], references: [id])
@@ -96,9 +102,9 @@ model Project {
   country        String        @default("India")
   notes          String?
   groupId        String?
-  createdById    Int
-  updatedById    Int?
+  createdBy      Int
   createdAt      DateTime      @default(now())
+  updatedBy      Int?
   updatedAt      DateTime      @updatedAt
   recStatus      Int           @default(1)
 
@@ -117,6 +123,7 @@ model Project {
 
 model Survey {
   id        Int     @id @default(autoincrement())
+  companyId Int
   surveyId  String  @unique
   projectId Int
   project   Project @relation(fields: [projectId], references: [id])
@@ -132,7 +139,9 @@ model Survey {
   groupId String?
 
   createdAt DateTime @default(now())
+  createdBy Int
   updatedAt DateTime @updatedAt
+  updatedBy Int?
   recStatus Int      @default(1)
 
   @@index([projectId])
@@ -142,6 +151,7 @@ model Survey {
 
 model EngineeringDesign {
   id         Int               @id @default(autoincrement())
+  companyId  Int
   designId   String            @unique
   // Engineering belongs to a Survey
   surveyId   Int               @unique
@@ -151,9 +161,10 @@ model EngineeringDesign {
   designerId Int?
   status     EngineeringStatus @default(PENDING)
 
-  groupId String?
-
+  groupId   String?
+  createdBy Int
   createdAt DateTime @default(now())
+  updatedBy Int?
   updatedAt DateTime @updatedAt
   recStatus Int      @default(1)
 

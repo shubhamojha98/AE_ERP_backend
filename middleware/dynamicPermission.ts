@@ -50,6 +50,7 @@ const INFRA_EXACT_EXEMPT: ReadonlySet<string> = new Set([
 const INFRA_PREFIX_EXEMPT: readonly string[] = [
     '/api/panel/notifications',
     '/api/panel/master/ward-list',
+    '/api/project',
 ];
 
 function isInfraExempt(rawPath: string): boolean {

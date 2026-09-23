@@ -13,12 +13,17 @@ CREATE TYPE "EngineeringStatus" AS ENUM ('PENDING', 'IN_PROGRESS', 'COMPLETED', 
 -- CreateTable
 CREATE TABLE "Customer" (
     "id" SERIAL NOT NULL,
+    "companyId" INTEGER NOT NULL,
     "customerCode" TEXT NOT NULL,
-    "name" TEXT NOT NULL,
-    "phone" TEXT NOT NULL,
-    "email" TEXT,
+    "customerName" TEXT NOT NULL,
+    "customerPhone" TEXT NOT NULL,
+    "customerEmail" TEXT,
+    "customerType" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "createdBy" INTEGER NOT NULL,
     "updatedAt" TIMESTAMP(3) NOT NULL,
+    "updatedBy" INTEGER,
+    "groupId" TEXT,
     "recStatus" INTEGER NOT NULL DEFAULT 1,
 
     CONSTRAINT "Customer_pkey" PRIMARY KEY ("id")
@@ -27,6 +32,7 @@ CREATE TABLE "Customer" (
 -- CreateTable
 CREATE TABLE "Project" (
     "id" SERIAL NOT NULL,
+    "companyId" INTEGER NOT NULL,
     "projectCode" TEXT NOT NULL,
     "customerId" INTEGER NOT NULL,
     "leadId" TEXT,
@@ -51,9 +57,10 @@ CREATE TABLE "Project" (
     "pincode" TEXT,
     "country" TEXT NOT NULL DEFAULT 'India',
     "notes" TEXT,
-    "createdById" INTEGER NOT NULL,
-    "updatedById" INTEGER,
+    "groupId" TEXT,
+    "createdBy" INTEGER NOT NULL,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedBy" INTEGER,
     "updatedAt" TIMESTAMP(3) NOT NULL,
     "recStatus" INTEGER NOT NULL DEFAULT 1,
 
@@ -63,14 +70,18 @@ CREATE TABLE "Project" (
 -- CreateTable
 CREATE TABLE "Survey" (
     "id" SERIAL NOT NULL,
+    "companyId" INTEGER NOT NULL,
     "surveyId" TEXT NOT NULL,
     "projectId" INTEGER NOT NULL,
     "scheduledDate" TIMESTAMP(3),
     "surveyorId" INTEGER,
     "status" "SurveyStatus" NOT NULL DEFAULT 'PENDING',
     "notes" TEXT,
+    "groupId" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "createdBy" INTEGER NOT NULL,
     "updatedAt" TIMESTAMP(3) NOT NULL,
+    "updatedBy" INTEGER,
     "recStatus" INTEGER NOT NULL DEFAULT 1,
 
     CONSTRAINT "Survey_pkey" PRIMARY KEY ("id")
@@ -79,12 +90,16 @@ CREATE TABLE "Survey" (
 -- CreateTable
 CREATE TABLE "EngineeringDesign" (
     "id" SERIAL NOT NULL,
+    "companyId" INTEGER NOT NULL,
     "designId" TEXT NOT NULL,
     "surveyId" INTEGER NOT NULL,
     "capacityKw" DECIMAL(10,2),
     "designerId" INTEGER,
     "status" "EngineeringStatus" NOT NULL DEFAULT 'PENDING',
+    "groupId" TEXT,
+    "createdBy" INTEGER NOT NULL,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedBy" INTEGER,
     "updatedAt" TIMESTAMP(3) NOT NULL,
     "recStatus" INTEGER NOT NULL DEFAULT 1,
 
@@ -95,13 +110,13 @@ CREATE TABLE "EngineeringDesign" (
 CREATE UNIQUE INDEX "Customer_customerCode_key" ON "Customer"("customerCode");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "Customer_phone_key" ON "Customer"("phone");
+CREATE UNIQUE INDEX "Customer_customerPhone_key" ON "Customer"("customerPhone");
 
 -- CreateIndex
-CREATE INDEX "Customer_name_idx" ON "Customer"("name");
+CREATE INDEX "Customer_customerName_idx" ON "Customer"("customerName");
 
 -- CreateIndex
-CREATE INDEX "Customer_phone_idx" ON "Customer"("phone");
+CREATE INDEX "Customer_customerPhone_idx" ON "Customer"("customerPhone");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "Project_projectCode_key" ON "Project"("projectCode");
