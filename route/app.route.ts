@@ -12,6 +12,7 @@ import panelRoute from "./panel/panel.route";
 import dashboard from "./dashboard/dashboard.route";
 import inventoryRoutes from "./inventory/invenotry.route";
 import projectRoutes from "./project/project.route";
+import leadRoutes from "./lead/lead.routes";
 
 
 
@@ -49,5 +50,6 @@ router.use("/api/panel", panelRoute);
 router.use("/api/dashboard", dashboard);
 router.use("/api/inventory", inventoryRoutes);
 router.use("/api/project", projectRoutes);
+router.use("/api/lead", leadRoutes);
 
 export default router;

@@ -1,8 +1,5 @@
--- CreateSchema
-CREATE SCHEMA IF NOT EXISTS "inventory";
-
 -- CreateTable
-CREATE TABLE "inventory"."product_categories" (
+CREATE TABLE "product_categories" (
     "id" SERIAL NOT NULL,
     "companyId" INTEGER NOT NULL,
     "categoryName" TEXT NOT NULL,
@@ -20,7 +17,7 @@ CREATE TABLE "inventory"."product_categories" (
 );
 
 -- CreateTable
-CREATE TABLE "inventory"."products" (
+CREATE TABLE "products" (
     "id" BIGSERIAL NOT NULL,
     "companyId" INTEGER NOT NULL,
     "productName" TEXT NOT NULL,
@@ -45,7 +42,7 @@ CREATE TABLE "inventory"."products" (
 );
 
 -- CreateTable
-CREATE TABLE "inventory"."warehouses" (
+CREATE TABLE "warehouses" (
     "id" SERIAL NOT NULL,
     "companyId" INTEGER NOT NULL,
     "warehouseName" TEXT NOT NULL,
@@ -72,7 +69,7 @@ CREATE TABLE "inventory"."warehouses" (
 );
 
 -- CreateTable
-CREATE TABLE "inventory"."stock" (
+CREATE TABLE "stock" (
     "id" SERIAL NOT NULL,
     "companyId" INTEGER NOT NULL,
     "productId" BIGINT NOT NULL,
@@ -88,46 +85,46 @@ CREATE TABLE "inventory"."stock" (
 );
 
 -- CreateIndex
-CREATE INDEX "products_companyId_idx" ON "inventory"."products"("companyId");
+CREATE INDEX "products_companyId_idx" ON "products"("companyId");
 
 -- CreateIndex
-CREATE INDEX "products_categoryId_idx" ON "inventory"."products"("categoryId");
+CREATE INDEX "products_categoryId_idx" ON "products"("categoryId");
 
 -- CreateIndex
-CREATE INDEX "products_productName_idx" ON "inventory"."products"("productName");
+CREATE INDEX "products_productName_idx" ON "products"("productName");
 
 -- CreateIndex
-CREATE INDEX "products_sku_idx" ON "inventory"."products"("sku");
+CREATE INDEX "products_sku_idx" ON "products"("sku");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "products_companyId_sku_key" ON "inventory"."products"("companyId", "sku");
+CREATE UNIQUE INDEX "products_companyId_sku_key" ON "products"("companyId", "sku");
 
 -- CreateIndex
-CREATE INDEX "warehouses_companyId_idx" ON "inventory"."warehouses"("companyId");
+CREATE INDEX "warehouses_companyId_idx" ON "warehouses"("companyId");
 
 -- CreateIndex
-CREATE INDEX "warehouses_warehouseName_idx" ON "inventory"."warehouses"("warehouseName");
+CREATE INDEX "warehouses_warehouseName_idx" ON "warehouses"("warehouseName");
 
 -- CreateIndex
-CREATE INDEX "warehouses_warehouseLocation_idx" ON "inventory"."warehouses"("warehouseLocation");
+CREATE INDEX "warehouses_warehouseLocation_idx" ON "warehouses"("warehouseLocation");
 
 -- CreateIndex
-CREATE INDEX "stock_companyId_idx" ON "inventory"."stock"("companyId");
+CREATE INDEX "stock_companyId_idx" ON "stock"("companyId");
 
 -- CreateIndex
-CREATE INDEX "stock_productId_idx" ON "inventory"."stock"("productId");
+CREATE INDEX "stock_productId_idx" ON "stock"("productId");
 
 -- CreateIndex
-CREATE INDEX "stock_warehouseId_idx" ON "inventory"."stock"("warehouseId");
+CREATE INDEX "stock_warehouseId_idx" ON "stock"("warehouseId");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "stock_productId_warehouseId_key" ON "inventory"."stock"("productId", "warehouseId");
+CREATE UNIQUE INDEX "stock_productId_warehouseId_key" ON "stock"("productId", "warehouseId");
 
 -- AddForeignKey
-ALTER TABLE "inventory"."products" ADD CONSTRAINT "products_categoryId_fkey" FOREIGN KEY ("categoryId") REFERENCES "inventory"."product_categories"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "products" ADD CONSTRAINT "products_categoryId_fkey" FOREIGN KEY ("categoryId") REFERENCES "product_categories"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "inventory"."stock" ADD CONSTRAINT "stock_productId_fkey" FOREIGN KEY ("productId") REFERENCES "inventory"."products"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "stock" ADD CONSTRAINT "stock_productId_fkey" FOREIGN KEY ("productId") REFERENCES "products"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "inventory"."stock" ADD CONSTRAINT "stock_warehouseId_fkey" FOREIGN KEY ("warehouseId") REFERENCES "inventory"."warehouses"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "stock" ADD CONSTRAINT "stock_warehouseId_fkey" FOREIGN KEY ("warehouseId") REFERENCES "warehouses"("id") ON DELETE RESTRICT ON UPDATE CASCADE;

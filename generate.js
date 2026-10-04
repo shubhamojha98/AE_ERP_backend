@@ -4,7 +4,8 @@ const schemas = [
     "prisma/schema.prisma",
     "prisma/db-log/schema.prisma",
     "prisma/inventory/schema.prisma",
-    "prisma/project/schema.prisma"
+    "prisma/project/schema.prisma",
+    "prisma/lead/schema.prisma"
 ];
 
 schemas.forEach((schema) => {

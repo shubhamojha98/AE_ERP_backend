@@ -8,50 +8,60 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// ================================================================
-// ENUMS
-// ================================================================
+// ============================================================
+// SOLAR PANEL — CORE (multi-tenant)
+// ============================================================
+// Tenancy
+//   Tenant (client account, created by super admin)
+//     └─ Company tree: main company → sub-companies (same tenant only)
+//   User belongs to exactly ONE tenant and has ONE home company.
+//   CompanyUser = access to a company: only the home company or its sub-companies.
+//     - same tenant  → enforced by DB (composite FKs)
+//     - descendant of home company → enforced by app (hierarchy_path startsWith)
+//   A user can never be added to another tenant's company.
+//
+// Access
+//   Platform : User.platform_role → RoleMaster(scope=PLATFORM) = SUPER_ADMIN (seed/developer only)
+//   Company  : CompanyUser → CompanyUserRole → Role → RolePermission → Permission
+//              + UserPermissionOverride (GRANT / REVOKE exceptions)
+//   Menu     : module enabled for company (CompanyModule or is_core) AND user has <menu>.view
+//   Data     : Role.data_scope → SELF / TEAM / COMPANY / COMPANY_TREE
+//
+// Effective permissions =
+//   (roles' permissions + active GRANTs) − active REVOKEs, limited to enabled modules
+//
+// App rules: lowercase email/username, no company-parent cycles,
+// set hierarchy_path/depth on company create/move, never UPDATE/DELETE audit_logs.
 
-enum UserType {
-  SUPER_ADMIN
-  PROJECT_MANAGER
-  ULB_ADMIN
-  ULB_USER
+// ========================= ENUMS =========================
+
+enum RoleScope {
+  PLATFORM
+  COMPANY
 }
 
-enum ActionType {
+enum DataScope {
+  SELF // only rows created by / assigned to the user
+  TEAM // user + users reporting to them
+  COMPANY // whole company
+  COMPANY_TREE // company + all sub-companies
+}
+
+enum PermissionAction {
   VIEW
-  ADD
+  CREATE
   EDIT
   DELETE
-  PAYMENT
   APPROVE
-  REJECT
+  ASSIGN
   EXPORT
+  IMPORT
   PRINT
-  VERIFY
 }
 
 enum PermissionEffect {
   GRANT
   REVOKE
-}
-
-enum AbacAttribute {
-  TIME_RANGE
-  IP_WHITELIST
-  ZONE_RESTRICT
-  WARD_RESTRICT
-  DATE_RANGE
-  DEVICE_TYPE
-}
-
-enum AuditAction {
-  GRANTED
-  REVOKED
-  DENIED
-  OVERRIDE_GRANT
-  OVERRIDE_REVOKE
 }
 
 enum PlatformType {
@@ -60,580 +70,621 @@ enum PlatformType {
   ALL
 }
 
-// ================================================================
-// GLOBAL LAYER
-// ================================================================
-
-model user {
-  id         Int       @id @default(autoincrement())
-  username   String    @unique
-  email      String?   @unique
-  phone      String    @unique
-  password   String
-  user_type  UserType  @default(ULB_USER)
-  is_active  Boolean   @default(true)
-  version    Int       @default(0)
-  created_at DateTime  @default(now())
-  updated_at DateTime  @default(now()) @updatedAt
-  deleted_at DateTime?
-
-  // Relations - Enterprise Layer
-  ulb_mappings      ulb_user_mapping[]
-  zone_ward_scopes  user_zone_ward_mapping[]
-  session_contexts  user_session_context[]
-  permission_grants user_permission[]        @relation("GrantedToUser")
-  permission_audits permission_audit_log[]   @relation("AuditUser")
-  abac_policies     user_abac_policy[]
-  refresh_tokens    refresh_token[]
-
-  // Legacy Relations (Updated)
-  employee           employee?
-  userNotification   notifications[]
-  loginAttempts      tbl_login_attempts[]
-  otpLogin           tbl_otp_login[]
-  tbl_property_block tbl_property_block[]
+enum TenantStatus {
+  TRIAL
+  ACTIVE
+  SUSPENDED
+  INACTIVE
 }
 
-// Refresh Token — for persistent sessions and logout/revocation
-model refresh_token {
-  id         Int      @id @default(autoincrement())
-  token      String   @unique
-  user_id    Int
-  ulb_id     Int? // Which ULB context this token is for
-  is_revoked Boolean  @default(false)
-  expires_at DateTime
+enum CompanyStatus {
+  TRIAL
+  ACTIVE
+  SUSPENDED
+  INACTIVE
+}
+
+enum UserStatus {
+  INVITED
+  ACTIVE
+  LOCKED
+  DISABLED
+}
+
+enum OtpPurpose {
+  LOGIN
+  PASSWORD_RESET
+  VERIFY_EMAIL
+  VERIFY_PHONE
+}
+
+enum AuditAction {
+  LOGIN
+  LOGIN_FAILED
+  LOGOUT
+  TOKEN_REUSE
+  PASSWORD_CHANGE
+  CREATE
+  UPDATE
+  DELETE
+  RESTORE
+  GRANT
+  REVOKE
+  DENIED
+  APPROVE
+  REJECT
+  EXPORT
+}
+
+// ========================= USER / AUTH =========================
+
+/// Global identity. Company access always goes through CompanyUser.
+model User {
+  id       Int     @id @default(autoincrement())
+  username String  @unique /// stored lowercase
+  email    String? @unique /// stored lowercase
+  phone    String? @unique /// E.164
+
+  password_hash        String
+  password_changed_at  DateTime?
+  must_change_password Boolean   @default(false)
+
+  first_name    String?
+  last_name     String?
+  profile_image String?
+
+  status             UserStatus @default(ACTIVE)
+  failed_login_count Int        @default(0)
+  locked_until       DateTime?
+  last_login_at      DateTime?
+  email_verified_at  DateTime?
+  phone_verified_at  DateTime?
+
+  /// Increment to invalidate every issued access token for this user.
+  token_version Int @default(0)
+
+  /// Only PLATFORM-scope role masters (SUPER_ADMIN). Never settable from the company UI.
+  platform_role_id Int?
+
+  /// null only for platform users (SUPER_ADMIN). Company users always have both.
+  tenant_id       Int?
+  home_company_id Int? /// own company; user may access only this company and its sub-companies
+
+  created_at DateTime  @default(now())
+  updated_at DateTime  @updatedAt
+  deleted_at DateTime?
+
+  platform_role RoleMaster? @relation("PlatformRole", fields: [platform_role_id], references: [id], onDelete: Restrict)
+  tenant        Tenant?     @relation(fields: [tenant_id], references: [id], onDelete: Restrict)
+  home_company  Company?    @relation("HomeCompany", fields: [home_company_id, tenant_id], references: [id, tenant_id], onDelete: NoAction, onUpdate: NoAction)
+
+  memberships       CompanyUser[]
+  created_companies Company[]      @relation("CompanyCreatedBy")
+  sessions          UserSession[]
+  login_attempts    LoginAttempt[]
+  otp_codes         OtpCode[]
+  notifications     Notification[]
+
+  @@unique([id, tenant_id]) // target for tenant-safe composite FKs
+  @@index([status])
+  @@index([platform_role_id])
+  @@index([tenant_id])
+  @@index([home_company_id])
+  @@map("users")
+}
+
+/// One row per login. Refresh token is stored only as a SHA-256 hash and rotated on every use.
+model UserSession {
+  id                Int    @id @default(autoincrement())
+  public_id         String @unique @default(uuid()) @db.Uuid /// `sid` claim in JWT
+  user_id           Int
+  active_company_id Int?
+
+  refresh_token_hash  String  @unique
+  previous_token_hash String? @unique /// presenting this again = token theft → revoke session
+
+  expires_at    DateTime
+  last_used_at  DateTime  @default(now())
+  revoked_at    DateTime?
+  revoke_reason String?
+
+  ip_address String?
+  user_agent String?
+  platform   PlatformType @default(WEB)
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  user           User     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  active_company Company? @relation(fields: [active_company_id], references: [id], onDelete: SetNull)
+
+  @@index([user_id, revoked_at])
+  @@index([active_company_id])
+  @@index([expires_at])
+  @@map("user_sessions")
+}
+
+model LoginAttempt {
+  id      BigInt @id @default(autoincrement())
+  user_id Int?
+
+  identifier String
+  ip_address String?
+  user_agent String?
+  success    Boolean @default(false)
+  reason     String?
+
+  attempted_at DateTime @default(now())
+
+  user User? @relation(fields: [user_id], references: [id], onDelete: SetNull)
+
+  @@index([user_id, attempted_at])
+  @@index([identifier, attempted_at])
+  @@index([ip_address, attempted_at])
+  @@map("login_attempts")
+}
+
+model OtpCode {
+  id      Int  @id @default(autoincrement())
+  user_id Int?
+
+  identifier String
+  purpose    OtpPurpose
+  code_hash  String
+
+  attempts     Int @default(0)
+  max_attempts Int @default(5)
+
+  expires_at  DateTime
+  consumed_at DateTime?
+  ip_address  String?
+
   created_at DateTime @default(now())
 
-  user user @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  user User? @relation(fields: [user_id], references: [id], onDelete: Cascade)
 
-  @@index([token])
+  @@index([identifier, purpose, created_at])
   @@index([user_id])
+  @@index([expires_at])
+  @@map("otp_codes")
 }
 
-// Global ULB entity
-model ulb_master {
-  id                Int       @id @default(autoincrement())
-  ulb_type_id       Int
-  name              String
-  name_hindi        String?
-  labels            Json? // For multi-language support { "en": "...", "hi": "..." }
-  address           String?
-  domainname        String?   @unique
-  gstno             String?
-  nigamtollfreeno   String?
-  receipttollfreeno String?
-  bankname          String?
-  accountno         String?
-  ifsccode          String?
-  municipallogo     String?
-  agencyfullname    String?
-  agencylogo        String?
-  payee_id          String?
-  latitude          String?
-  longitude         String?
-  is_active         Boolean   @default(true)
-  version           Int       @default(0)
-  recstatus         Int       @default(1)
-  created_at        DateTime  @default(now())
-  updated_at        DateTime  @default(now()) @updatedAt
-  deleted_at        DateTime?
+// ========================= COMPANY / TENANCY =========================
 
-  ulb_type        ulb_type               @relation(fields: [ulb_type_id], references: [id])
-  zones           zone_master[]
-  user_mappings   ulb_user_mapping[]
-  roles           role[]
-  module_mappings ulb_module_mapping[]
-  agencies        agency[]
-  notifications   notifications[]
-  property_blocks tbl_property_block[]
-  audit_logs      permission_audit_log[]
-}
+/// Client account (one per customer business). Hard isolation boundary.
+model Tenant {
+  id   Int    @id @default(autoincrement())
+  code String @unique
+  name String
 
-model ulb_type {
-  id         Int          @id @default(autoincrement())
-  name       String       @unique
-  recstatus  Int          @default(1)
-  created_at DateTime     @default(now())
-  updated_at DateTime     @default(now()) @updatedAt
-  ulbs       ulb_master[]
-}
+  status        TenantStatus @default(ACTIVE)
+  max_companies Int?
+  max_users     Int?
+  valid_till    DateTime?
 
-// Global module catalog — property, swm, water, shop, trade...
-model module {
-  id          Int          @id @default(autoincrement())
-  code        String       @unique // "property", "swm", "water", "trade"
-  label       String       // "Property Tax", "Solid Waste Mgmt"
-  description String?
-  icon        String?
-  order       Int          @default(0)
-  platform    PlatformType @default(WEB) // WEB | MOBILE | ALL
-  is_active   Boolean      @default(true)
-  version     Int          @default(0)
-  created_at  DateTime     @default(now())
-  updated_at  DateTime     @default(now()) @updatedAt
-  deleted_at  DateTime?
-
-  ulb_mappings ulb_module_mapping[]
-  menus        menu[]
-  employee     employee[]
-}
-
-// Global menu — belongs to module, hierarchical
-model menu {
-  id         Int          @id @default(autoincrement())
-  module_id  Int
-  label      String
-  path       String?
-  icon       String?
-  parentId   Int?
-  order      Int          @default(0)
-  platform   PlatformType @default(WEB) // WEB | MOBILE | ALL — controls where this menu appears
-  is_active  Boolean      @default(true)
-  version    Int          @default(0)
-  created_at DateTime     @default(now())
-  updated_at DateTime     @default(now()) @updatedAt
-  deleted_at DateTime?
-
-  module   module        @relation(fields: [module_id], references: [id])
-  parent   menu?         @relation("MenuHierarchy", fields: [parentId], references: [id])
-  children menu[]        @relation("MenuHierarchy")
-  actions  menu_action[]
-}
-
-// Every possible action on a menu — global definition
-model menu_action {
-  id         Int        @id @default(autoincrement())
-  menu_id    Int
-  action     ActionType
-  label      String // "View Property List", "Add New Property"
-  is_active  Boolean    @default(true)
-  created_at DateTime   @default(now())
-
-  menu             menu                   @relation(fields: [menu_id], references: [id])
-  role_grants      role_menu_action[]
-  user_permissions user_permission[]
-  audit_logs       permission_audit_log[]
-
-  @@unique([menu_id, action])
-}
-
-// ================================================================
-// ULB WORKSPACE LAYER — completely isolated per ULB
-// ================================================================
-
-// Which modules are enabled for which ULB
-model ulb_module_mapping {
-  id         Int      @id @default(autoincrement())
-  ulb_id     Int
-  module_id  Int
-  is_active  Boolean  @default(true)
-  version    Int      @default(0)
-  created_at DateTime @default(now())
-  updated_at DateTime @default(now()) @updatedAt
-
-  ulb    ulb_master @relation(fields: [ulb_id], references: [id])
-  module module     @relation(fields: [module_id], references: [id])
-
-  @@unique([ulb_id, module_id])
-  @@index([ulb_id])
-}
-
-// Zones — scoped to ULB
-model zone_master {
-  id                   Int       @id @default(autoincrement())
-  ulb_id               Int
-  name                 String
-  zone_address         String?
-  zone_commissioner    String?
-  commissioner_contact String?
-  tollFree_No          String?
-  zonecode             String?
-  latitude             String?
-  longitude            String?
-  is_active            Boolean   @default(true)
-  version              Int       @default(0)
-  recstatus            Int       @default(1)
-  created_at           DateTime  @default(now())
-  updated_at           DateTime  @default(now()) @updatedAt
-  deleted_at           DateTime?
-
-  ulb           ulb_master               @relation(fields: [ulb_id], references: [id])
-  wards         ward_master[]
-  user_mappings ulb_user_mapping[]
-  zone_scopes   user_zone_ward_mapping[] @relation("ZoneUserScope")
-
-  @@unique([ulb_id, zonecode])
-  @@index([ulb_id])
-}
-
-// Wards — scoped to zone + ULB (Hardened with composite keys)
-model ward_master {
-  id         Int       @id @default(autoincrement())
-  zone_id    Int
-  ulb_id     Int 
-  ward_no    String
-  name       String?
-  ward_code  String?
-  area       String?
-  is_active  Boolean   @default(true)
-  version    Int       @default(0)
-  recstatus  Int       @default(1)
   created_at DateTime  @default(now())
-  updated_at DateTime  @default(now()) @updatedAt
+  updated_at DateTime  @updatedAt
   deleted_at DateTime?
 
-  // HARDENED RELATION: Ensures ward belongs to a zone in the CORRECT ULB
-  zone          zone_master              @relation(fields: [zone_id], references: [id])
-  user_mappings ulb_user_mapping[]
-  ward_scopes   user_zone_ward_mapping[] @relation("WardUserScope")
+  companies Company[]
+  users     User[]
 
-  @@unique([ulb_id, ward_no])
-  @@index([ulb_id])
-  @@index([zone_id])
+  @@index([status])
+  @@map("tenants")
 }
 
-// Role — scoped to ULB
-model role {
-  id          Int       @id @default(autoincrement())
-  ulb_id      Int
+/// Company inside a tenant. parent_company_id builds main company → sub-company tree (same tenant only).
+model Company {
+  id                Int  @id @default(autoincrement())
+  tenant_id         Int
+  parent_company_id Int?
+
+  /// "/1/4/9/" (ancestors + self) — set by app on create/move. Subtree query: hierarchy_path startsWith "/1/"
+  hierarchy_path String @default("")
+  depth          Int    @default(0)
+
+  code       String  @unique
+  name       String
+  legal_name String?
+
+  email   String?
+  phone   String?
+  website String?
+  address String?
+  city    String?
+  state   String?
+  country String  @default("India")
+  pincode String?
+  gstin   String?
+  pan     String?
+  logo    String?
+
+  timezone String @default("Asia/Kolkata")
+  currency String @default("INR")
+
+  status    CompanyStatus @default(ACTIVE)
+  max_users Int?
+
+  /// Super admin (main company / any sub-company) or a company admin (sub-company under his own tree)
+  created_by_id Int?
+
+  created_at DateTime  @default(now())
+  updated_at DateTime  @updatedAt
+  deleted_at DateTime?
+
+  tenant     Tenant    @relation(fields: [tenant_id], references: [id], onDelete: Restrict)
+  created_by User?     @relation("CompanyCreatedBy", fields: [created_by_id], references: [id], onDelete: SetNull)
+  parent     Company?  @relation("CompanyTree", fields: [parent_company_id, tenant_id], references: [id, tenant_id], onDelete: NoAction, onUpdate: NoAction)
+  children   Company[] @relation("CompanyTree")
+
+  members         CompanyUser[]
+  home_users      User[]               @relation("HomeCompany")
+  roles           Role[]
+  modules         CompanyModule[]
+  bank_accounts   CompanyBankAccount[]
+  active_sessions UserSession[]
+  notifications   Notification[]
+
+  @@unique([id, tenant_id]) // target for tenant-safe composite FKs
+  @@index([tenant_id])
+  @@index([parent_company_id])
+  @@index([hierarchy_path])
+  @@index([status])
+  @@map("companies")
+}
+
+/// Access of a user to one company of HIS OWN tenant (home company or its sub-companies).
+model CompanyUser {
+  id         Int @id @default(autoincrement())
+  tenant_id  Int
+  company_id Int
+  user_id    Int
+
+  employee_code String?
+  designation   String?
+  department    String?
+
+  /// Manager inside the same company (drives DataScope.TEAM).
+  reports_to_id Int?
+
+  is_default Boolean @default(false) /// company opened after login (keep one per user)
+  is_active  Boolean @default(true)
+
+  joined_at  DateTime  @default(now())
+  left_at    DateTime?
+  created_at DateTime  @default(now())
+  updated_at DateTime  @updatedAt
+
+  company Company @relation(fields: [company_id, tenant_id], references: [id, tenant_id], onDelete: Restrict)
+  user    User    @relation(fields: [user_id, tenant_id], references: [id, tenant_id], onDelete: Cascade)
+
+  reports_to CompanyUser?  @relation("ReportsTo", fields: [reports_to_id, company_id], references: [id, company_id], onDelete: NoAction, onUpdate: NoAction)
+  reportees  CompanyUser[] @relation("ReportsTo")
+
+  roles                CompanyUserRole[]
+  permission_overrides UserPermissionOverride[] @relation("OverrideTarget")
+  granted_overrides    UserPermissionOverride[] @relation("OverrideGrantedBy")
+
+  @@unique([company_id, user_id])
+  @@unique([id, company_id]) // target for tenant-safe composite FKs
+  @@unique([company_id, employee_code])
+  @@index([tenant_id])
+  @@index([user_id])
+  @@index([reports_to_id])
+  @@map("company_users")
+}
+
+model CompanyBankAccount {
+  id         Int @id @default(autoincrement())
+  company_id Int
+
+  bank_name      String
+  branch_name    String?
+  account_name   String
+  account_number String /// encrypt at application level; return masked in APIs
+  ifsc_code      String
+  upi_id         String?
+
+  is_primary Boolean @default(false)
+  is_active  Boolean @default(true)
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  company Company @relation(fields: [company_id], references: [id], onDelete: Restrict)
+
+  @@index([company_id])
+  @@map("company_bank_accounts")
+}
+
+// ========================= ROLE MASTER / ROLES =========================
+
+/// Platform catalogue of role templates (managed by developer / super admin).
+/// scope = PLATFORM → assignable to User.platform_role (SUPER_ADMIN)
+/// scope = COMPANY  → copied into a company as Role with its default permissions
+model RoleMaster {
+  id Int @id @default(autoincrement())
+
+  code        String    @unique
   name        String
   description String?
-  is_active   Boolean   @default(true)
-  version     Int       @default(0)
-  recstatus   Int       @default(1)
-  created_at  DateTime  @default(now())
-  updated_at  DateTime  @default(now()) @updatedAt
-  deleted_at  DateTime?
+  scope       RoleScope @default(COMPANY)
 
-  ulb               ulb_master         @relation(fields: [ulb_id], references: [id])
-  user_mappings     ulb_user_mapping[]
-  role_menu_actions role_menu_action[]
+  default_data_scope DataScope @default(COMPANY)
 
-  @@unique([ulb_id, name])
-  @@index([ulb_id])
+  is_system Boolean @default(false) /// cannot be edited / deleted from UI
+  is_active Boolean @default(true)
+
+  display_order Int @default(0)
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  permissions    RoleMasterPermission[]
+  roles          Role[]
+  platform_users User[]                 @relation("PlatformRole")
+
+  @@index([scope, is_active])
+  @@map("role_masters")
 }
 
-// RBAC base — what actions a role can perform
-model role_menu_action {
-  id             Int      @id @default(autoincrement())
-  role_id        Int
-  menu_action_id Int
-  ulb_id         Int // denormalized for fast lookup + future RLS
-  is_active      Boolean  @default(true)
-  created_by     Int? // super_admin or ulb_admin user_id
-  created_at     DateTime @default(now())
-  updated_at     DateTime @default(now()) @updatedAt
+model RoleMasterPermission {
+  role_master_id Int
+  permission_id  Int
 
-  role        role        @relation(fields: [role_id], references: [id])
-  menu_action menu_action @relation(fields: [menu_action_id], references: [id])
+  role_master RoleMaster @relation(fields: [role_master_id], references: [id], onDelete: Cascade)
+  permission  Permission @relation(fields: [permission_id], references: [id], onDelete: Cascade)
 
-  @@unique([role_id, menu_action_id])
-  @@index([ulb_id])
-  @@index([role_id])
+  @@id([role_master_id, permission_id])
+  @@index([permission_id])
+  @@map("role_master_permissions")
 }
 
-// ================================================================
-// USER ↔ ULB MAPPING — the core access bridge
-// A user can be mapped to multiple ULBs, each with own role+scope
-// ================================================================
+/// Company role. Created from a RoleMaster template or fully custom.
+model Role {
+  id             Int  @id @default(autoincrement())
+  company_id     Int
+  role_master_id Int?
 
-model ulb_user_mapping {
-  id          Int      @id @default(autoincrement())
-  user_id     Int
-  ulb_id      Int
-  role_id     Int
-  // Legacy single scope — kept for backward compat; use user_zone_ward_mapping for multi-zone
-  zone_id     Int?
-  ward_id     Int?
-  is_active   Boolean  @default(true)
-  assigned_by Int?
-  created_at  DateTime @default(now())
-  updated_at  DateTime @default(now()) @updatedAt
+  code        String
+  name        String
+  description String?
+  data_scope  DataScope @default(COMPANY)
 
-  user user         @relation(fields: [user_id], references: [id])
-  ulb  ulb_master   @relation(fields: [ulb_id], references: [id])
-  role role         @relation(fields: [role_id], references: [id])
-  zone zone_master? @relation(fields: [zone_id], references: [id])
-  ward ward_master? @relation(fields: [ward_id], references: [id])
+  is_system Boolean @default(false) /// e.g. COMPANY_ADMIN — protected from deletion
+  is_active Boolean @default(true)
 
-  // one role per user per ULB
-  @@unique([user_id, ulb_id])
-  @@index([ulb_id])
-  @@index([user_id])
-}
-
-// ================================================================
-// GEOGRAPHIC SCOPE — multi-zone × multi-ward per user per ULB
-// Replaces single zone_id/ward_id for granular geographic access
-// ================================================================
-
-model user_zone_ward_mapping {
-  id          Int      @id @default(autoincrement())
-  user_id     Int
-  ulb_id      Int
-  zone_id     Int
-  ward_id     Int? // null = entire zone access; set = specific ward only
-  is_active   Boolean  @default(true)
-  assigned_by Int?
-  created_at  DateTime @default(now())
-  updated_at  DateTime @default(now()) @updatedAt
-
-  user user         @relation(fields: [user_id], references: [id], onDelete: Cascade)
-  zone zone_master  @relation("ZoneUserScope", fields: [zone_id], references: [id])
-  ward ward_master? @relation("WardUserScope", fields: [ward_id], references: [id])
-
-  // A user can have multiple zone+ward combos per ULB
-  @@unique([user_id, ulb_id, zone_id, ward_id])
-  @@index([user_id, ulb_id])
-  @@index([zone_id])
-}
-
-// ================================================================
-// OVERRIDE LAYER — user-level grant/revoke on top of RBAC
-// ================================================================
-
-// Explicit per-user permission override (GRANT or REVOKE a specific action)
-model user_permission {
-  id             Int              @id @default(autoincrement())
-  user_id        Int
-  ulb_id         Int // which ULB this override applies to
-  menu_action_id Int
-  effect         PermissionEffect // GRANT or REVOKE
-  reason         String? // why this was granted/revoked
-  valid_from     DateTime? // time-boxed grants
-  valid_until    DateTime?
-  is_active      Boolean          @default(true)
-  granted_by     Int // admin who set this
-  created_at     DateTime         @default(now())
-  updated_at     DateTime         @default(now()) @updatedAt
-
-  user        user        @relation("GrantedToUser", fields: [user_id], references: [id])
-  menu_action menu_action @relation(fields: [menu_action_id], references: [id])
-
-  @@unique([user_id, ulb_id, menu_action_id])
-  @@index([user_id, ulb_id])
-  @@index([ulb_id])
-}
-
-// ================================================================
-// ABAC LAYER — attribute-based contextual conditions
-// ================================================================
-
-// Policy attached to a user in a ULB context
-model user_abac_policy {
-  id         Int           @id @default(autoincrement())
-  user_id    Int
-  ulb_id     Int
-  attribute  AbacAttribute
-  // Flexible JSON value: e.g. {"from":"09:00","to":"18:00"} or {"ips":["10.0.0.1"]}
-  value      Json
-  is_active  Boolean       @default(true)
-  created_by Int?
-  created_at DateTime      @default(now())
-  updated_at DateTime      @default(now()) @updatedAt
-
-  user user @relation(fields: [user_id], references: [id])
-
-  @@index([user_id, ulb_id])
-}
-
-// ================================================================
-// AUDIT LOG — every access decision recorded
-// ================================================================
-
-model permission_audit_log {
-  id             BigInt      @id @default(autoincrement())
-  user_id        Int
-  ulb_id         Int
-  menu_action_id Int
-  action         AuditAction
-  reason         String? // "role_grant", "user_override", "abac_fail", "revoked"
-  ip_address     String?
-  user_agent     String?
-  zone_id        Int?
-  ward_id        Int?
-  created_at     DateTime    @default(now())
-
-  user        user        @relation("AuditUser", fields: [user_id], references: [id])
-  ulb         ulb_master  @relation(fields: [ulb_id], references: [id])
-  menu_action menu_action @relation(fields: [menu_action_id], references: [id])
-
-  @@index([user_id, ulb_id])
-  @@index([ulb_id, created_at])
-}
-
-// ================================================================
-// SESSION CONTEXT — tracks which ULB/zone/ward user is active in
-// (a user mapped to multiple ULBs needs to "switch workspace")
-// ================================================================
-
-model user_session_context {
-  id             Int      @id @default(autoincrement())
-  user_id        Int
-  active_ulb_id  Int
-  active_zone_id Int?
-  active_ward_id Int?
-  session_token  String   @unique
-  expires_at     DateTime
-  created_at     DateTime @default(now())
-  updated_at     DateTime @default(now()) @updatedAt
-
-  user user @relation(fields: [user_id], references: [id])
-
-  @@index([user_id])
-  @@index([session_token])
-}
-
-// ================================================================
-// EMPLOYEE — ULB-scoped staff profile
-// ================================================================
-
-model employee {
-  id                Int       @id @default(autoincrement())
-  user_id           Int       @unique
-  ulb_id            Int
-  agency_id         Int
-  module_id         Int?
-  empCode           String
-  empFirstName      String
-  empLastName       String
-  empImage          String?
-  contactNo         String
-  empEmail          String?
-  aadharNo          String?
-  empAddress        String?
-  joiningDate       String?
-  accountHolderName String?
-  accountNo         String?
-  ifscCode          String?
-  bankName          String?
-  jobTitle          String?
-  reportToUserId    Int?
-  blockPayment      Boolean   @default(false)
-  is_active         Boolean   @default(true)
-  version           Int       @default(0)
-  recstatus         Int       @default(1)
-  created_at        DateTime  @default(now())
-  updated_at        DateTime  @default(now()) @updatedAt
-  deleted_at        DateTime?
-
-  user   user    @relation(fields: [user_id], references: [id])
-  agency agency  @relation(fields: [agency_id], references: [id])
-  module module? @relation(fields: [module_id], references: [id])
-
-  @@index([ulb_id])
-}
-
-model agency {
-  id         Int       @id @default(autoincrement())
-  ulb_id     Int
-  name       String
-  is_active  Boolean   @default(true)
-  version    Int       @default(0)
-  recstatus  Int       @default(1)
   created_at DateTime  @default(now())
-  updated_at DateTime  @default(now()) @updatedAt
+  updated_at DateTime  @updatedAt
   deleted_at DateTime?
 
-  ulb       ulb_master @relation(fields: [ulb_id], references: [id])
-  employees employee[]
+  company     Company     @relation(fields: [company_id], references: [id], onDelete: Restrict)
+  role_master RoleMaster? @relation(fields: [role_master_id], references: [id], onDelete: SetNull)
 
-  @@unique([ulb_id, name])
+  permissions RolePermission[]
+  members     CompanyUserRole[]
+
+  @@unique([company_id, code])
+  @@unique([id, company_id]) // target for tenant-safe composite FKs
+  @@index([role_master_id])
+  @@map("roles")
 }
 
-// ================================================================
-// SECURITY & AUTH
-// ================================================================
+/// Role ↔ membership. Composite FKs guarantee role and member belong to the SAME company.
+model CompanyUserRole {
+  company_id      Int
+  company_user_id Int
+  role_id         Int
 
-model tbl_login_attempts {
-  id                          Int       @id @default(autoincrement())
-  user_id                     Int
-  attempts                    Int       @default(0)
-  lastAttempt                 DateTime?
-  otp_expires                 DateTime?
-  isOtpVerified               Boolean   @default(false)
-  otp_sent_count              Int       @default(0)
-  outside_location_attempts   Int       @default(0)
-  outside_location_blockUntil DateTime?
-  otp_block_until             DateTime?
-  user                        user      @relation(fields: [user_id], references: [id])
+  assigned_by_id Int?
+  assigned_at    DateTime @default(now())
+
+  company_user CompanyUser @relation(fields: [company_user_id, company_id], references: [id, company_id], onDelete: Cascade)
+  role         Role        @relation(fields: [role_id, company_id], references: [id, company_id], onDelete: Cascade)
+
+  @@id([company_user_id, role_id])
+  @@index([role_id])
+  @@index([company_id])
+  @@map("company_user_roles")
 }
 
-model tbl_otp_login {
-  id         Int      @id @default(autoincrement())
-  user_id    Int?
-  mobile_no  String
-  otp        String
-  msg        String?
-  is_used    Boolean  @default(false)
+// ========================= MODULES / MENUS / PERMISSIONS =========================
+
+model Module {
+  id Int @id @default(autoincrement())
+
+  code        String  @unique
+  name        String
+  description String?
+  icon        String?
+
+  /// true → platform console only (companies, role master …); never enabled for a company
+  is_platform Boolean @default(false)
+  /// true → always enabled for every company (dashboard, administration)
+  is_core     Boolean @default(false)
+
+  display_order Int          @default(0)
+  platform      PlatformType @default(ALL)
+  is_active     Boolean      @default(true)
+
   created_at DateTime @default(now())
-  updated_at DateTime @default(now()) @updatedAt
-  user       user?    @relation(fields: [user_id], references: [id])
+  updated_at DateTime @updatedAt
+
+  menus     Menu[]
+  companies CompanyModule[]
+
+  @@index([is_active, display_order])
+  @@map("modules")
 }
 
-model tbl_property_block {
-  id         Int       @id @default(autoincrement())
-  ulb_id     Int?
-  user_id    Int?
-  reason     String?
-  from_block DateTime?
-  to_block   DateTime?
-  ip_address String
-  recstatus  Int       @default(1)
+/// Module subscription per company.
+model CompanyModule {
+  company_id Int
+  module_id  Int
+
+  is_active  Boolean   @default(true)
+  valid_till DateTime?
+
+  enabled_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  company Company @relation(fields: [company_id], references: [id], onDelete: Cascade)
+  module  Module  @relation(fields: [module_id], references: [id], onDelete: Cascade)
+
+  @@id([company_id, module_id])
+  @@index([module_id])
+  @@map("company_modules")
+}
+
+/// Sidebar tree. Leaf menus own permissions; group menus have path = null.
+model Menu {
+  id        Int  @id @default(autoincrement())
+  module_id Int
+  parent_id Int?
+
+  code String  @unique /// e.g. "leads.followups" — permission codes derive from it
+  name String
+  path String? /// frontend route
+  icon String?
+
+  display_order Int          @default(0)
+  platform      PlatformType @default(ALL)
+  is_active     Boolean      @default(true)
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  module   Module @relation(fields: [module_id], references: [id], onDelete: Cascade)
+  parent   Menu?  @relation("MenuTree", fields: [parent_id], references: [id], onDelete: Cascade)
+  children Menu[] @relation("MenuTree")
+
+  permissions Permission[]
+
+  @@index([module_id, display_order])
+  @@index([parent_id])
+  @@map("menus")
+}
+
+/// One row per (menu, action). code = "<menu.code>.<action>" e.g. "sales.quotations.approve"
+model Permission {
+  id      Int              @id @default(autoincrement())
+  menu_id Int
+  action  PermissionAction
+
+  code        String  @unique
+  name        String
+  description String?
+  is_active   Boolean @default(true)
+
+  created_at DateTime @default(now())
+
+  menu Menu @relation(fields: [menu_id], references: [id], onDelete: Cascade)
+
+  roles        RolePermission[]
+  role_masters RoleMasterPermission[]
+  overrides    UserPermissionOverride[]
+
+  @@unique([menu_id, action])
+  @@map("permissions")
+}
+
+model RolePermission {
+  role_id       Int
+  permission_id Int
+
+  granted_at DateTime @default(now())
+
+  role       Role       @relation(fields: [role_id], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permission_id], references: [id], onDelete: Cascade)
+
+  @@id([role_id, permission_id])
+  @@index([permission_id])
+  @@map("role_permissions")
+}
+
+/// Per-user exception inside one company. REVOKE always wins over role grants.
+model UserPermissionOverride {
+  id              Int @id @default(autoincrement())
+  company_id      Int
+  company_user_id Int
+  permission_id   Int
+
+  effect PermissionEffect
+  reason String?
+
+  valid_from  DateTime?
+  valid_until DateTime?
+
+  granted_by_id Int?
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  company_user CompanyUser  @relation("OverrideTarget", fields: [company_user_id, company_id], references: [id, company_id], onDelete: Cascade)
+  granted_by   CompanyUser? @relation("OverrideGrantedBy", fields: [granted_by_id], references: [id], onDelete: SetNull)
+  permission   Permission   @relation(fields: [permission_id], references: [id], onDelete: Cascade)
+
+  @@unique([company_user_id, permission_id])
+  @@index([company_id])
+  @@index([permission_id])
+  @@map("user_permission_overrides")
+}
+
+// ========================= NOTIFICATIONS =========================
+
+model Notification {
+  id         Int  @id @default(autoincrement())
+  user_id    Int
+  company_id Int?
+
+  title   String
+  message String
+  type    String?
+  link    String?
+
+  entity_type String?
+  entity_id   String?
+
+  read_at    DateTime?
   created_at DateTime  @default(now())
 
-  user user?       @relation(fields: [user_id], references: [id])
-  ulb  ulb_master? @relation(fields: [ulb_id], references: [id])
+  user    User     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  company Company? @relation(fields: [company_id], references: [id], onDelete: Cascade)
 
-  @@index([ulb_id])
-}
-
-model notifications {
-  id         BigInt   @id @default(autoincrement())
-  ulb_id     Int?
-  user_id    Int?
-  room       String?  @db.VarChar(50)
-  title      String
-  message    String
-  type       String?  @db.VarChar(20)
-  data       Json?
-  is_read    Boolean  @default(false)
-  created_at DateTime @default(now())
-
-  user user?       @relation(fields: [user_id], references: [id], onDelete: NoAction)
-  ulb  ulb_master? @relation(fields: [ulb_id], references: [id])
-
-  @@index([ulb_id, is_read])
-  @@index([room])
+  @@index([user_id, read_at, created_at])
+  @@index([company_id])
   @@map("notifications")
 }
 
-model bank {
-  id         Int      @id @default(autoincrement())
-  name       String   @unique
-  is_active  Boolean  @default(true)
+// ========================= AUDIT (append-only) =========================
+// No FKs on purpose: history must survive user/company changes and rows are never updated.
+
+model AuditLog {
+  id         BigInt @id @default(autoincrement())
+  user_id    Int?
+  company_id Int?
+
+  action          AuditAction
+  module_code     String?
+  permission_code String?
+
+  entity_type String?
+  entity_id   String?
+
+  description String?
+  old_values  Json?
+  new_values  Json?
+  metadata    Json?
+
+  request_id String?
+  ip_address String?
+  user_agent String?
+
   created_at DateTime @default(now())
-}
 
-// ================================================================
-// GLOBAL CITIZEN OTP VERIFICATION
-// Single table used across all modules: grievance, property, water…
-// ================================================================
-
-model citizen_otp {
-  id           String   @id @default(uuid()) 
-  ulb_id       Int?    
-  module       String? 
-  action       String  
-  identifier   String   
-  otp          String  
-  is_used      Boolean  @default(false) 
-  attempts     Int      @default(0)    
-  max_attempts Int      @default(3)     
-  ip_address   String?
-  expires_at   DateTime                  
-  created_at   DateTime @default(now())
-  updated_at   DateTime @default(now()) @updatedAt
-  @@index([identifier, is_used, expires_at]) 
-  @@index([ulb_id, module, action])        
+  @@index([company_id, created_at])
+  @@index([user_id, created_at])
+  @@index([entity_type, entity_id])
+  @@index([action])
+  @@map("audit_logs")
 }

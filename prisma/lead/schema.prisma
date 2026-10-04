@@ -1,0 +1,95 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../../generated/lead"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL_LEADS")
+
+  schemas = ["lead"]
+}
+
+model LeadSourceMaster {
+  id          Int      @id @default(autoincrement())
+  name        String   @unique
+  companyId   Int
+  description String?
+  createdBy   Int?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  recStatus   Int      @default(1)
+  groupId     String?
+
+  leads LeadMaster[]
+
+  @@index([recStatus])
+  @@map("lead_source_master")
+  @@schema("lead")
+}
+
+model LeadMaster {
+  id Int @id @default(autoincrement())
+
+  companyId Int
+  leadNo    String @unique
+
+  leadSourceId Int
+  leadSource   LeadSourceMaster @relation(fields: [leadSourceId], references: [id])
+
+  customerName String
+  mobileNo     String
+  email        String?
+
+  address String?
+  city    String?
+  state   String?
+  pincode String?
+
+  assignedTo Int?
+
+  lastFollowupDate DateTime?
+  nextFollowupDate DateTime?
+
+  remarks String?
+
+  createdBy Int?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  recStatus Int      @default(1)
+  groupId   String?
+
+  followups LeadFollowup[]
+
+  @@index([mobileNo])
+  @@index([assignedTo])
+  @@index([leadSourceId])
+  @@map("lead_master")
+  @@schema("lead")
+}
+
+model LeadFollowup {
+  id Int @id @default(autoincrement())
+
+  companyId Int
+
+  leadId   Int
+  statusId Int
+
+  followupDate     DateTime  @default(now())
+  remarks          String?
+  nextFollowupDate DateTime?
+
+  createdBy Int?
+  createdAt DateTime @default(now())
+
+  groupId String?
+
+  lead LeadMaster @relation(fields: [leadId], references: [id])
+
+  @@index([leadId])
+  @@index([statusId])
+  @@index([followupDate])
+  @@map("lead_followup")
+  @@schema("lead")
+}

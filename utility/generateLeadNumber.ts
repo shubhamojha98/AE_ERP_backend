@@ -1,18 +1,17 @@
-// import { crm } from "../lib/globalprimsaclient";
+import { lead } from "../lib/globalprimsaclient";
 
-// export const generateLeadNumber = async () => {
+export const generateLeadNumber = async () => {
+    const lastLead = await lead.leadMaster.findFirst({
+        orderBy: {
+            id: "desc"
+        },
+        select: {
+            id: true,
+            leadNo: true,
+        }
+    });
 
-//     const lastLead = await crm.lead_master.findFirst({
-//         orderBy: {
-//             id: "desc"
-//         },
-//         select: {
-//             id: true,
-//             lead_no: true,
-//         }
-//     });
+    const nextId = (lastLead?.id ?? 0) + 1;
 
-//     const nextId = (lastLead?.id ?? 0) + 1;
-
-//     return `LD${String(nextId).padStart(6, "0")}`;
-// };
+    return `LD${String(nextId).padStart(6, "0")}`;
+};

@@ -1,106 +1,346 @@
 import { Request, Response } from "express";
-import { PrismaClient as panelClient, UserType } from "../../generated/panel";
-import { PrismaClient as dblogClient } from "../../generated/db-log";
-import genrateResponse from "../../lib/generateResponse";
-import HttpStatus from "../../lib/httpStatus";
 import bcrypt from "bcrypt";
-import jwt, { JwtPayload } from "jsonwebtoken";
 import crypto from "crypto";
 import {
-  buildUserPermissions,
-  buildUserZoneWardScopes,
-} from "../../dal/panel.dal";
+  AuditAction,
+  OtpPurpose,
+  PlatformType,
+  Prisma,
+  UserStatus,
+} from "../../generated/panel";
+import { panel } from "../../lib/globalprimsaclient";
+import genrateResponse from "../../lib/generateResponse";
+import HttpStatus from "../../lib/httpStatus";
 import { sendWhatsappOtp } from "../../utility/sendWhatsappOtp";
-import pointInPolygon from "../../utility/geoLocation";
-// import {
-//   createBlockEntry,
-//   isUserBlockedInPropertyBlock,
-// } from "../property/property.controller";
-import socketService from "../../services/socket-service";
-import { AuthenticatedRequest } from "../../src/core/types";
 import { extractPayload, encryptData } from "../../lib/apiCryptography";
+import {
+  ACCESS_TOKEN_TTL,
+  AuthenticatedRequest,
+  signAccessToken,
+} from "../../middleware/authMiddleware";
+import {
+  AccessContext,
+  AccessUser,
+  accessUserInclude,
+  canAccessCompany,
+  CompanyOption,
+  getAccessContext,
+  isSuperAdmin,
+  listAccessibleCompanies,
+  resolveDefaultCompanyId,
+} from "../../dal/access.dal";
 
-const panel = new panelClient();
-const log = new dblogClient();
+// ============================================================
+// CONFIG
+// ============================================================
+const BCRYPT_ROUNDS = 12;
+const REFRESH_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+const MAX_FAILED_PASSWORD = 3; // after this → OTP required
+const LOCK_MINUTES = 30; // lock when OTP cannot be sent / OTP limit hit
+const OTP_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const OTP_WINDOW_MS = 15 * 60 * 1000;
+const OTP_MAX_PER_WINDOW = 3; // max OTPs per 15 min per purpose
+const RESET_MAX_PER_DAY = 5;
+const PASSWORD_MIN_LENGTH = 8;
+const WHATSAPP_TEMPLATE = "otp_services_new";
 
-const JWT_SECRET = process.env.JWT_SECRET;
-const REFRESH_SECRET = process.env.REFRESH_SECRET || JWT_SECRET; // Set REFRESH_SECRET in .env separately
-const REFRESH_EXPIRES = 7 * 24 * 60 * 60 * 1000; // 7 days in ms
+// ============================================================
+// HELPERS
+// ============================================================
+const sha256 = (value: string) =>
+  crypto.createHash("sha256").update(value).digest("hex");
+const newRefreshToken = () => crypto.randomBytes(48).toString("base64url");
+const newOtp = () => crypto.randomInt(100000, 1000000).toString();
 
+function clientInfo(req: Request) {
+  const ip =
+    (req.headers["x-forwarded-for"] as string | undefined)
+      ?.split(",")[0]
+      ?.trim() ||
+    req.socket.remoteAddress ||
+    null;
+  const userAgent = req.headers["user-agent"] || null;
+  const platform = /mobile|android|iphone/i.test(userAgent ?? "")
+    ? PlatformType.MOBILE
+    : PlatformType.WEB;
+  return { ip, userAgent, platform };
+}
 
-function isPrivilegedUserCheck(
-  userType: string,
-  roleNames: string[] = [],
-): boolean {
-  if (userType === "SUPER_ADMIN" || userType === "PROJECT_MANAGER") return true;
-  return roleNames.some(
-    (r) => r.toLowerCase().replace(/[-_]/g, "") === "superadmin",
+function passwordError(password: unknown): string | null {
+  if (typeof password !== "string" || password.length < PASSWORD_MIN_LENGTH) {
+    return `Password must be at least ${PASSWORD_MIN_LENGTH} characters`;
+  }
+  if (!/[A-Za-z]/.test(password) || !/\d/.test(password))
+    return "Password must contain letters and numbers";
+  return null;
+}
+
+async function findUserByIdentifier(identifier: string) {
+  const value = identifier.trim();
+  return panel.user.findFirst({
+    where: {
+      deleted_at: null,
+      OR: [
+        { username: value.toLowerCase() },
+        { email: value.toLowerCase() },
+        { phone: value },
+      ],
+    },
+    include: accessUserInclude,
+  });
+}
+
+const findUserById = (id: number) =>
+  panel.user.findFirst({
+    where: { id, deleted_at: null },
+    include: accessUserInclude,
+  });
+
+async function recordLoginAttempt(
+  req: Request,
+  identifier: string,
+  userId: number | null,
+  success: boolean,
+  reason?: string,
+) {
+  const { ip, userAgent } = clientInfo(req);
+  await panel.loginAttempt.create({
+    data: {
+      identifier,
+      user_id: userId,
+      success,
+      reason,
+      ip_address: ip,
+      user_agent: userAgent,
+    },
+  });
+}
+
+async function audit(
+  req: Request,
+  data: Omit<Prisma.AuditLogUncheckedCreateInput, "ip_address" | "user_agent">,
+) {
+  const { ip, userAgent } = clientInfo(req);
+  await panel.auditLog
+    .create({ data: { ...data, ip_address: ip, user_agent: userAgent } })
+    .catch((e) => console.error("[audit]", e));
+}
+
+/** Returns a blocking message if the user cannot log in right now, otherwise null. */
+function loginBlockReason(user: AccessUser): string | null {
+  if (user.status === UserStatus.DISABLED)
+    return "Account disabled. Please contact your administrator.";
+  if (user.status === UserStatus.INVITED) return "Account not activated yet.";
+  if (user.locked_until && user.locked_until > new Date()) {
+    return `Account locked until ${user.locked_until.toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}`;
+  }
+  if (user.status === UserStatus.LOCKED)
+    return "Account locked. Please contact your administrator.";
+  return null;
+}
+
+async function otpLimitReached(
+  userId: number,
+  purpose: OtpPurpose,
+  windowMs: number,
+  max: number,
+) {
+  const count = await panel.otpCode.count({
+    where: {
+      user_id: userId,
+      purpose,
+      created_at: { gte: new Date(Date.now() - windowMs) },
+    },
+  });
+  return count >= max;
+}
+
+/** Creates a new OTP (old unused ones of same purpose are invalidated) and sends it on WhatsApp. */
+async function issueOtp(
+  req: Request,
+  user: { id: number; phone: string },
+  purpose: OtpPurpose,
+) {
+  const code = newOtp();
+  await panel.$transaction([
+    panel.otpCode.updateMany({
+      where: { user_id: user.id, purpose, consumed_at: null },
+      data: { consumed_at: new Date() },
+    }),
+    panel.otpCode.create({
+      data: {
+        user_id: user.id,
+        identifier: user.phone,
+        purpose,
+        code_hash: sha256(code),
+        expires_at: new Date(Date.now() + OTP_TTL_MS),
+        ip_address: clientInfo(req).ip,
+      },
+    }),
+  ]);
+  sendWhatsappOtp(user.phone, WHATSAPP_TEMPLATE, [code], "en_US").catch((e) =>
+    console.error("[OTP] WhatsApp send failed:", e),
   );
 }
 
-/**
- * Fetch all active ULBs the user can see, using their privilege level.
- */
-async function resolveAccessibleUlbs(
-  isPrivileged: boolean,
-  ulb_mappings: Array<{
-    ulb: {
-      id: number;
-      name: string;
-      name_hindi: string | null;
-      is_active: boolean;
-    };
-  }>,
-  orderBy: "id" | "name" = "id",
-) {
-  if (isPrivileged) {
-    return panel.ulb_master.findMany({
-      where: { deleted_at: null, is_active: true },
-      select: { id: true, name: true, name_hindi: true },
-      orderBy: { [orderBy]: "asc" },
+type OtpCheck = { ok: true } | { ok: false; message: string };
+
+async function verifyOtp(
+  userId: number,
+  purpose: OtpPurpose,
+  code: unknown,
+): Promise<OtpCheck> {
+  const otp = await panel.otpCode.findFirst({
+    where: {
+      user_id: userId,
+      purpose,
+      consumed_at: null,
+      expires_at: { gt: new Date() },
+    },
+    orderBy: { id: "desc" },
+  });
+  if (!otp)
+    return { ok: false, message: "OTP expired. Please request a new one." };
+
+  const expected = Buffer.from(otp.code_hash, "hex");
+  const received = Buffer.from(sha256(String(code ?? "")), "hex");
+  if (crypto.timingSafeEqual(expected, received)) {
+    await panel.otpCode.update({
+      where: { id: otp.id },
+      data: { consumed_at: new Date() },
     });
+    return { ok: true };
   }
-  return ulb_mappings
-    .filter((m) => m.ulb.is_active)
-    .map((m) => ({
-      id: m.ulb.id,
-      name: m.ulb.name,
-      name_hindi: m.ulb.name_hindi,
-    }));
+
+  const attempts = otp.attempts + 1;
+  const exhausted = attempts >= otp.max_attempts;
+  await panel.otpCode.update({
+    where: { id: otp.id },
+    data: { attempts, ...(exhausted && { consumed_at: new Date() }) },
+  });
+  return {
+    ok: false,
+    message: exhausted
+      ? "Too many wrong attempts. Please request a new OTP."
+      : `Invalid OTP. ${otp.max_attempts - attempts} attempt(s) left.`,
+  };
 }
 
-export function buildMenuTree(
-  menus: Array<{
-    id: number;
-    label: string;
-    path: string;
-    parentId: number | null;
-  }>,
+function buildUserPayload(
+  user: AccessUser,
+  ctx: AccessContext,
+  companies: CompanyOption[],
 ) {
-  const menusById = new Map<number, any>();
-  const tree: any[] = [];
-
-  // First, create placeholder entries for each menu
-  menus.forEach((menu) => {
-    menusById.set(menu.id, { ...menu, children: [] });
-  });
-
-  // Assign children to parent menus
-  menus.forEach((menu) => {
-    if (menu.parentId && menusById.has(menu.parentId)) {
-      menusById.get(menu.parentId).children.push(menusById.get(menu.id));
-    } else {
-      tree.push(menusById.get(menu.id));
-    }
-  });
-
-  return tree;
+  return {
+    id: user.id,
+    username: user.username,
+    name: [user.first_name, user.last_name].filter(Boolean).join(" "),
+    email: user.email,
+    phone: user.phone,
+    profileImage: user.profile_image,
+    mustChangePassword: user.must_change_password,
+    isSuperAdmin: ctx.isSuperAdmin,
+    activeCompanyId: ctx.companyId,
+    activeCompany: companies.find((c) => c.id === ctx.companyId) ?? null,
+    companies,
+    roles: ctx.roles,
+    dataScope: ctx.dataScope,
+    permissions: ctx.permissions,
+    menus: ctx.menus,
+  };
 }
 
+async function buildAuthResponse(
+  user: AccessUser,
+  sessionPublicId: string,
+  companyId: number | null,
+) {
+  const [ctx, companies] = await Promise.all([
+    getAccessContext(user.id, companyId),
+    listAccessibleCompanies(user),
+  ]);
+  const token = signAccessToken({
+    uid: user.id,
+    sid: sessionPublicId,
+    cid: companyId,
+    tv: user.token_version,
+  });
+  return {
+    token,
+    expiresIn: ACCESS_TOKEN_TTL,
+    user: buildUserPayload(user, ctx, companies),
+  };
+}
+
+/** Successful authentication → new session + tokens. */
+async function startSession(
+  req: Request,
+  res: Response,
+  user: AccessUser,
+  identifier: string,
+) {
+  const companyId = await resolveDefaultCompanyId(user);
+  if (!isSuperAdmin(user) && companyId == null) {
+    await recordLoginAttempt(
+      req,
+      identifier,
+      user.id,
+      false,
+      "NO_COMPANY_ACCESS",
+    );
+    return genrateResponse(
+      res,
+      HttpStatus.Forbidden,
+      "No active company assigned. Please contact your administrator.",
+    );
+  }
+
+  const { ip, userAgent, platform } = clientInfo(req);
+  const refreshToken = newRefreshToken();
+
+  const [session] = await panel.$transaction([
+    panel.userSession.create({
+      data: {
+        user_id: user.id,
+        active_company_id: companyId,
+        refresh_token_hash: sha256(refreshToken),
+        expires_at: new Date(Date.now() + REFRESH_TTL_MS),
+        ip_address: ip,
+        user_agent: userAgent,
+        platform,
+      },
+    }),
+    panel.user.update({
+      where: { id: user.id },
+      data: {
+        failed_login_count: 0,
+        locked_until: null,
+        last_login_at: new Date(),
+      },
+    }),
+  ]);
+
+  await recordLoginAttempt(req, identifier, user.id, true);
+  await audit(req, {
+    user_id: user.id,
+    company_id: companyId,
+    action: AuditAction.LOGIN,
+    description: "Login successful",
+  });
+
+  const auth = await buildAuthResponse(user, session.public_id, companyId);
+  return genrateResponse(res, HttpStatus.OK, "Login successful", {
+    ...auth,
+    refreshToken,
+  });
+}
+
+// ============================================================
+// LOGIN
+// ============================================================
 export const login = async (req: Request, res: Response) => {
   try {
-    const { username, password, latitude, longitude } = req.body;
-
+    const { username, password } = req.body ?? {};
     if (!username || !password) {
       return genrateResponse(
         res,
@@ -108,30 +348,11 @@ export const login = async (req: Request, res: Response) => {
         "Username and password are required",
       );
     }
+    const identifier = String(username);
 
-    // ---------- FETCH USER (Enterprise Layer) ----------
-    const user = await panel.user.findFirst({
-      where: {
-        OR: [{ username: username }, { phone: username }],
-      },
-      include: {
-        ulb_mappings: {
-          include: {
-            ulb: {
-              select: {
-                id: true,
-                name: true,
-                name_hindi: true,
-                is_active: true,
-              },
-            },
-          },
-        },
-        loginAttempts: true,
-      },
-    });
-
-    if (!user || user.deleted_at) {
+    const user = await findUserByIdentifier(identifier);
+    if (!user) {
+      await recordLoginAttempt(req, identifier, null, false, "USER_NOT_FOUND");
       return genrateResponse(
         res,
         HttpStatus.Unauthorized,
@@ -139,303 +360,93 @@ export const login = async (req: Request, res: Response) => {
       );
     }
 
-    if (!user.is_active) {
-      return genrateResponse(
-        res,
-        HttpStatus.Forbidden,
-        "Not authorized. Please contact your administrator.",
-      );
+    const blocked = loginBlockReason(user);
+    if (blocked) {
+      await recordLoginAttempt(req, identifier, user.id, false, "BLOCKED");
+      return genrateResponse(res, HttpStatus.Forbidden, blocked);
     }
 
-    // Resolve ULB Access list — using shared helper
-    const isGlobalPrivileged =
-      user.user_type === "SUPER_ADMIN" || user.user_type === "PROJECT_MANAGER";
-    const ulbs = await resolveAccessibleUlbs(
-      isGlobalPrivileged,
-      user.ulb_mappings as any,
-      "id",
+    const passwordOk = await bcrypt.compare(
+      String(password),
+      user.password_hash,
     );
+    if (!passwordOk) {
+      const updated = await panel.user.update({
+        where: { id: user.id },
+        data: { failed_login_count: { increment: 1 } },
+        select: { failed_login_count: true },
+      });
+      await recordLoginAttempt(
+        req,
+        identifier,
+        user.id,
+        false,
+        "WRONG_PASSWORD",
+      );
+      await audit(req, {
+        user_id: user.id,
+        action: AuditAction.LOGIN_FAILED,
+        description: "Wrong password",
+      });
 
-    // ---------- LOCATION CHECK (skip for super-admin/PM globally) ----------
-    if (!isGlobalPrivileged) {
-      if (latitude == null || longitude == null) {
+      if (updated.failed_login_count < MAX_FAILED_PASSWORD) {
+        const remainingAttempts =
+          MAX_FAILED_PASSWORD - updated.failed_login_count;
         return genrateResponse(
           res,
-          HttpStatus.BadRequest,
-          "Latitude & Longitude required for field staff",
+          HttpStatus.Unauthorized,
+          `Invalid password. ${remainingAttempts} attempt${remainingAttempts === 1 ? "" : "s"} remaining before OTP is required.`,
+          { remainingAttempts },
         );
       }
 
-      const latNum = Number(latitude);
-      const lngNum = Number(longitude);
-
-      if (Number.isNaN(latNum) || Number.isNaN(lngNum)) {
-        return genrateResponse(
-          res,
-          HttpStatus.BadRequest,
-          "Invalid coordinates",
-        );
-      }
-
-      const targetUlbId = ulbs.length > 0 ? ulbs[0].id : null;
-      const targetBoundary = [[1, 1], [1, 1.1], [1.1, 1.1], [1.1, 1]] as [number, number][];
-      const isInside = pointInPolygon([lngNum, latNum], targetBoundary);
-
-      if (!isInside) {
-        // record / increment invalid location attempts
-        let attempt = user.loginAttempts[0];
-
-        if (!attempt) {
-          await panel.tbl_login_attempts.create({
-            data: {
-              user_id: user.id,
-              outside_location_attempts: 1,
-              lastAttempt: new Date(),
-              isOtpVerified: false,
-            },
-          });
-        } else {
-          const updated = await panel.tbl_login_attempts.update({
-            where: { id: attempt.id },
-            data: {
-              outside_location_attempts: { increment: 1 },
-              lastAttempt: new Date(),
-            },
-          });
-
-          if (updated.outside_location_attempts >= 3) {
-            const { to } = await createBlockEntry(
-              user.id,
-              "Invalid location attempts exceeded",
-              req,
-              24,
-            );
-            await panel.tbl_login_attempts.update({
-              where: { id: attempt.id },
-              data: { outside_location_blockUntil: to },
-            });
-
-            return genrateResponse(
-              res,
-              HttpStatus.Forbidden,
-              `Account locked due to location security breach until ${to}`,
-            );
-          }
-        }
-
+      // Too many failures → OTP on phone, or lock if not possible
+      const canSendOtp =
+        user.phone &&
+        !(await otpLimitReached(
+          user.id,
+          OtpPurpose.LOGIN,
+          OTP_WINDOW_MS,
+          OTP_MAX_PER_WINDOW,
+        ));
+      if (!canSendOtp) {
+        const lockedUntil = new Date(Date.now() + LOCK_MINUTES * 60 * 1000);
+        await panel.user.update({
+          where: { id: user.id },
+          data: { locked_until: lockedUntil, failed_login_count: 0 },
+        });
         return genrateResponse(
           res,
           HttpStatus.Forbidden,
-          "Restricted: You must be within the allowed municipal area to login.",
-        );
-      }
-    }
-
-    // ---------- PASSWORD CHECK ----------
-    const passwordMatch = await bcrypt.compare(password, user.password);
-    let attempt = user.loginAttempts[0];
-
-    if (!passwordMatch) {
-      const MAX_ATTEMPTS = 3;
-      let updatedAttempt;
-
-      if (!attempt) {
-        // First-ever failure — create the record
-        updatedAttempt = await panel.tbl_login_attempts.create({
-          data: {
-            user_id: user.id,
-            attempts: 1,
-            lastAttempt: new Date(),
-            isOtpVerified: false,
-          },
-        });
-      } else {
-        updatedAttempt = await panel.tbl_login_attempts.update({
-          where: { id: attempt.id },
-          data: { attempts: { increment: 1 }, lastAttempt: new Date() },
-        });
-      }
-
-      const currentAttempts = updatedAttempt.attempts;
-
-      // ── 3 failures → send OTP and gate login behind verification
-      if (currentAttempts >= MAX_ATTEMPTS) {
-        if (!user.phone) {
-          return genrateResponse(
-            res,
-            HttpStatus.Forbidden,
-            "Too many failed login attempts. Contact your administrator to unlock your account.",
-          );
-        }
-
-        const otp = Math.floor(100000 + Math.random() * 900000).toString();
-
-        await panel.tbl_otp_login.create({
-          data: {
-            user_id: user.id,
-            otp,
-            msg: "Login OTP – too many failed attempts",
-            mobile_no: user.phone,
-          },
-        });
-
-        await panel.tbl_login_attempts.update({
-          where: { id: updatedAttempt.id },
-          data: {
-            otp_expires: new Date(Date.now() + 5 * 60 * 1000),
-            isOtpVerified: false,
-            attempts: 0, // reset so next login cycle works cleanly
-          },
-        });
-
-        // Non-blocking — failure here should not stop the OTP response
-        sendWhatsappOtp(user.phone, "otp_services_new", [otp], "en_US").catch(
-          (otpErr) =>
-            console.error("[Login] OTP send failed (non-blocking):", otpErr),
-        );
-
-        return genrateResponse(
-          res,
-          HttpStatus.OK,
-          "Too many failed attempts. An OTP has been sent to your registered phone.",
-          {
-            otpRequired: true,
-            user: user.id, // consumed by frontend enterOtpState()
-            phone: user.phone, // frontend masks to ****XXXX
-            ttlSeconds: 300,
-          },
+          `Too many failed attempts. Account locked for ${LOCK_MINUTES} minutes.`,
         );
       }
 
-      const remainingAttempts = MAX_ATTEMPTS - currentAttempts;
+      await panel.user.update({
+        where: { id: user.id },
+        data: { failed_login_count: 0 },
+      });
+      await issueOtp(
+        req,
+        { id: user.id, phone: user.phone! },
+        OtpPurpose.LOGIN,
+      );
       return genrateResponse(
         res,
-        HttpStatus.Unauthorized,
-        `Invalid password. ${remainingAttempts} attempt${remainingAttempts === 1 ? "" : "s"} remaining before OTP is required.`,
-        { remainingAttempts },
+        HttpStatus.OK,
+        "Too many failed attempts. An OTP has been sent to your registered phone.",
+        {
+          otpRequired: true,
+          user: user.id,
+          phone: user.phone!.slice(-4),
+          ttlSeconds: OTP_TTL_MS / 1000,
+        },
       );
     }
 
-    // ---------- SUCCESSFUL LOGIN ----------
-
-    // Reset security flags
-    if (attempt) {
-      await panel.tbl_login_attempts.update({
-        where: { id: attempt.id },
-        data: {
-          attempts: 0,
-          outside_location_attempts: 0,
-          isOtpVerified: true,
-          otp_expires: null,
-        },
-      });
-    }
-
-    // Create Enterprise Session Context
-    // Default to the first mapped ULB if not privileged
-    const activeUlbId = ulbs.length > 0 ? ulbs[0].id : 0;
-    const sessionToken = jwt.sign(
-      { userId: user.id, ts: Date.now() },
-      String(JWT_SECRET),
-      { expiresIn: "8h" },
-    );
-
-    await panel.user_session_context.create({
-      data: {
-        user_id: user.id,
-        active_ulb_id: activeUlbId,
-        session_token: sessionToken,
-        expires_at: new Date(Date.now() + 8 * 60 * 60 * 1000),
-      },
-    });
-
-    // Audit Log
-    const ipAddress =
-      (req.headers["x-forwarded-for"] as string | undefined)?.split(",")[0] ||
-      req.socket.remoteAddress ||
-      null;
-    const userAgent = req.headers["user-agent"] || null;
-
-    await log.tbl_user_login_logs.create({
-      data: {
-        username: user.username,
-        password: "HIDDEN",
-        userType: user.user_type,
-        login_id: String(user.id),
-        ip_address: ipAddress,
-        user_agent: userAgent,
-        ismobileDesktop: /mobile/i.test(userAgent || "") ? "mobile" : "desktop",
-        entryBy: user.id,
-        is_success: true,
-      },
-    });
-
-    // ---------- PREPARE PAYLOAD ----------
-    const roles = user.ulb_mappings.map((m) => m.role_id);
-    const roleNames = await panel.role.findMany({
-      where: { id: { in: roles } },
-      select: { name: true },
-    });
-
-    const roleList = roleNames.map((r) => r.name);
-    const isPrivilegedUser = isPrivilegedUserCheck(user.user_type, roleList);
-
-    // Build permission set — MODULE:ACTION strings derived from role → menu_action → module
-    // Privileged users bypass middleware, so they get an empty array (no JWT bloat).
-    const primaryUlbId = ulbs[0]?.id ?? null;
-    const permissions =
-      !isPrivilegedUser && primaryUlbId
-        ? await buildUserPermissions(user.id, primaryUlbId)
-        : [];
-
-    const zone_ward_scopes =
-      !isPrivilegedUser && primaryUlbId
-        ? await buildUserZoneWardScopes(user.id, primaryUlbId)
-        : "ALL";
-
-    const payload = {
-      userId: user.id,
-      email: user.email,
-      userType: user.user_type,
-      ulbs,
-      roles: roleList,
-      permissions, // ✅ e.g. ["PROPERTY:VIEW", "WATER:ADD"]
-      zone_ward_scopes,
-      isPrivilegedUser,
-      sessionToken,
-      latitude: latitude ? Number(latitude) : null,
-      longitude: longitude ? Number(longitude) : null,
-    };
-
-    // Access token — short lived (2h). Refresh token handles re-auth silently.
-    const accessToken = jwt.sign(payload, String(JWT_SECRET), {
-      expiresIn: "2h",
-    });
-
-    // Refresh token — long lived (7 days), stored in DB for revocation control
-    const refreshPayload = { userId: user.id, ulbId: primaryUlbId };
-    const rawRefreshToken = jwt.sign(refreshPayload, String(REFRESH_SECRET), {
-      expiresIn: "7d",
-    });
-
-    const refreshExpiry = new Date(Date.now() + REFRESH_EXPIRES);
-    await panel.refresh_token.create({
-      data: {
-        token: rawRefreshToken,
-        user_id: user.id,
-        ulb_id: primaryUlbId,
-        expires_at: refreshExpiry,
-      },
-    });
-
-    return genrateResponse(res, HttpStatus.OK, "Login successful", {
-      token: accessToken,
-      refreshToken: rawRefreshToken,
-      expiresIn: "2h",
-      user: payload,
-    });
-  } catch (err: any) {
-    console.error("Enterprise Login Error:", err);
+    return await startSession(req, res, user, identifier);
+  } catch (err) {
+    console.error("[Login] Error:", err);
     return genrateResponse(
       res,
       HttpStatus.InternalServerError,
@@ -444,519 +455,96 @@ export const login = async (req: Request, res: Response) => {
   }
 };
 
-export const logoutUser = async (req: AuthenticatedRequest, res: Response) => {
-  try {
-    const userId = req.user?.userId;
-
-    if (!userId) {
-      return res
-        .status(401)
-        .json({ success: false, message: "Not authenticated" });
-    }
-
-    const { refreshToken } = req.body;
-
-    // Revoke the specific refresh token if provided, otherwise revoke all
-    if (refreshToken) {
-      await panel.refresh_token.updateMany({
-        where: { token: refreshToken, user_id: userId },
-        data: { is_revoked: true },
-      });
-    } else {
-      // Full logout — revoke ALL refresh tokens for this user
-      await panel.refresh_token.updateMany({
-        where: { user_id: userId, is_revoked: false },
-        data: { is_revoked: true },
-      });
-    }
-
-    // Log the logout
-    const user = await panel.user.findUnique({ where: { id: userId } });
-    if (user) {
-      const ip =
-        req.headers["x-forwarded-for"]?.toString().split(",")[0] ||
-        req.socket.remoteAddress ||
-        "";
-      const device = req.headers["user-agent"] || "";
-      await log.tbl_user_logout_logs.create({
-        data: {
-          username: user.username,
-          password: "N/A",
-          userType: user.user_type,
-          login_id: String(userId),
-          ip_address: ip,
-          user_agent: device,
-          entryBy: userId,
-        },
-      });
-    }
-
-    return res
-      .status(200)
-      .json({
-        success: true,
-        message: "Logged out successfully",
-        clearToken: true,
-      });
-  } catch (error) {
-    console.error("[Logout] Error:", error);
-    return res
-      .status(500)
-      .json({ success: false, message: "Internal Server Error" });
-  }
-};
-
-export const refreshAccessToken = async (req: Request, res: Response) => {
-  try {
-    const { refreshToken } = req.body;
-
-    if (!refreshToken) {
-      return res
-        .status(400)
-        .json({ success: false, message: "Refresh token is required" });
-    }
-
-    // 1. Verify the refresh token JWT
-    let decoded: any;
-    try {
-      decoded = jwt.verify(refreshToken, String(REFRESH_SECRET));
-    } catch {
-      return res
-        .status(401)
-        .json({ success: false, message: "Invalid or expired refresh token" });
-    }
-
-    // 2. Check DB — token must exist and not be revoked
-    const storedToken = await panel.refresh_token.findUnique({
-      where: { token: refreshToken },
-    });
-
-    if (
-      !storedToken ||
-      storedToken.is_revoked ||
-      storedToken.expires_at < new Date()
-    ) {
-      return res
-        .status(401)
-        .json({
-          success: false,
-          message: "Refresh token has been revoked or expired",
-        });
-    }
-
-    // 3. Fetch fresh user data (role / permissions may have changed)
-    const user = await panel.user.findUnique({
-      where: { id: storedToken.user_id },
-      include: {
-        ulb_mappings: { include: { ulb: true, role: true } },
-      },
-    });
-
-    if (!user || !user.is_active) {
-      return res
-        .status(401)
-        .json({
-          success: false,
-          message: "Not authorized. Please contact your administrator.",
-        });
-    }
-
-    const roleNames = user.ulb_mappings
-      .map((m) => (m.role as any)?.name)
-      .filter(Boolean);
-    const isPrivilegedUser = isPrivilegedUserCheck(user.user_type, roleNames);
-
-    const ulbId = storedToken.ulb_id || user.ulb_mappings[0]?.ulb_id || null;
-    const ulbs = await resolveAccessibleUlbs(
-      isPrivilegedUser,
-      user.ulb_mappings as any,
-      "id",
-    );
-
-    // 4. Rebuild permissions from DB (picks up any role changes since last login)
-    const permissions =
-      !isPrivilegedUser && ulbId
-        ? await buildUserPermissions(user.id, ulbId)
-        : [];
-
-    const zone_ward_scopes =
-      !isPrivilegedUser && ulbId
-        ? await buildUserZoneWardScopes(user.id, ulbId)
-        : "ALL";
-
-    const roles = roleNames;
-
-    const accessPayload = {
-      userId: user.id,
-      email: user.email,
-      userType: user.user_type,
-      ulbs,
-      roles,
-      permissions,
-      zone_ward_scopes,
-      isPrivilegedUser,
-    };
-
-    const newAccessToken = jwt.sign(accessPayload, String(JWT_SECRET), {
-      expiresIn: "2h",
-    });
-
-    return res.status(200).json({
-      success: true,
-      message: "Token refreshed successfully",
-      data: { token: newAccessToken, user: accessPayload },
-    });
-  } catch (error) {
-    console.error("[RefreshToken] Error:", error);
-    return res
-      .status(500)
-      .json({ success: false, message: "Internal Server Error" });
-  }
-};
-
-
-export const switchUlb = async (req: AuthenticatedRequest, res: Response) => {
-  try {
-    const currentUser = req.user!;
-    const data = extractPayload(req.body);
-    const ulbId = Number(data?.ulb_id);
-
-    if (!ulbId || isNaN(ulbId)) {
-      return res
-        .status(400)
-        .json({ success: false, message: "Valid ulb_id is required" });
-    }
-
-    // 1. Fetch fresh user from DB (never rely on stale JWT data)
-    const freshUser = await panel.user.findUnique({
-      where: { id: currentUser.userId },
-      include: {
-        ulb_mappings: {
-          include: {
-            ulb: {
-              select: {
-                id: true,
-                name: true,
-                name_hindi: true,
-                is_active: true,
-              },
-            },
-            role: { select: { id: true, name: true } },
-          },
-        },
-      },
-    });
-
-    if (!freshUser || !freshUser.is_active) {
-      return res
-        .status(401)
-        .json({ success: false, message: "User not found or inactive" });
-    }
-
-    const freshRoleNames = freshUser.ulb_mappings
-      .map((m) => m.role?.name)
-      .filter(Boolean) as string[];
-    const isPrivilegedUser = isPrivilegedUserCheck(
-      freshUser.user_type,
-      freshRoleNames,
-    );
-
-    // 2. Validate ULB access (standard users only)
-    if (!isPrivilegedUser) {
-      const hasAccess = freshUser.ulb_mappings.some((m) => m.ulb_id === ulbId);
-      if (!hasAccess) {
-        return res
-          .status(403)
-          .json({
-            success: false,
-            message: "You do not have access to this ULB",
-          });
-      }
-    }
-
-    // 3. Fetch the target ULB details
-    const targetUlb = await panel.ulb_master.findUnique({
-      where: { id: ulbId, deleted_at: null } as any,
-      select: { id: true, name: true, name_hindi: true, is_active: true },
-    });
-
-    if (!targetUlb) {
-      return res.status(404).json({ success: false, message: "ULB not found" });
-    }
-
-    if (!targetUlb.is_active) {
-      return res
-        .status(403)
-        .json({ success: false, message: "This ULB is currently inactive" });
-    }
-
-    // 4. Build fresh permissions for the target ULB scope
-    const permissions = !isPrivilegedUser
-      ? await buildUserPermissions(freshUser.id, ulbId)
-      : [];
-
-    const zone_ward_scopes = !isPrivilegedUser
-      ? await buildUserZoneWardScopes(freshUser.id, ulbId)
-      : "ALL";
-
-    // 5. Get all accessible ULBs for this user (for the nav switcher)
-    const allAccessibleUlbs = await resolveAccessibleUlbs(
-      isPrivilegedUser,
-      freshUser.ulb_mappings as any,
-      "name",
-    );
-
-    // 5b. Session-context hardening: validate the session's ULB is still active
-    const activeSession = await panel.user_session_context.findFirst({
-      where: { user_id: freshUser.id },
-      orderBy: { updated_at: "desc" },
-    });
-    if (activeSession && activeSession.active_ulb_id !== ulbId) {
-      // Session is for a different ULB than requested — verify it is still accessible
-      const sessionUlbStillActive = allAccessibleUlbs.some(
-        (u: any) => u.id === activeSession.active_ulb_id,
-      );
-      if (!sessionUlbStillActive) {
-        // The previously active ULB was disabled — silently fall back to the target
-        console.warn(
-          `[SwitchULB] Session ULB ${activeSession.active_ulb_id} is inactive, resetting to ${ulbId}`,
-        );
-      }
-    }
-
-    // 6. Derive roles for the target ULB specifically
-    const targetMapping = freshUser.ulb_mappings.find(
-      (m) => m.ulb_id === ulbId,
-    );
-    const roleList = targetMapping?.role ? [targetMapping.role.name] : [];
-
-    // 7. Update the session context in DB
-    await panel.user_session_context.updateMany({
-      where: { user_id: freshUser.id },
-      data: { active_ulb_id: ulbId },
-    });
-
-    // 8. Build a clean, fresh payload (NO stale iat/exp fields)
-    const newPayload = {
-      userId: freshUser.id,
-      email: freshUser.email,
-      userType: freshUser.user_type,
-      ulbs: allAccessibleUlbs,
-      activeUlbId: ulbId, // ← explicit active ULB for frontend
-      roles: roleList,
-      permissions,
-      zone_ward_scopes,
-      isPrivilegedUser,
-    };
-
-    const newToken = jwt.sign(newPayload, String(JWT_SECRET), {
-      expiresIn: "8h",
-    });
-
-    console.info(
-      `[SwitchULB] userId=${freshUser.id} → ulbId=${ulbId} (${targetUlb.name})`,
-    );
-
-    return res.status(200).json({
-      success: true,
-      message: `Switched to ${targetUlb.name}`,
-      data: {
-        token: newToken,
-        activeUlb: targetUlb,
-        user: newPayload,
-      },
-    });
-  } catch (error: any) {
-    console.error("[SwitchULB] Error:", error?.message || error);
-    return res.status(500).json({
-      success: false,
-      message: "Failed to switch ULB context",
-      ...(process.env.NODE_ENV === "development" && { detail: error?.message }),
-    });
-  }
-};
-
+// ============================================================
+// LOGIN OTP (after too many wrong passwords)
+// ============================================================
 export const verifyOTP = async (req: Request, res: Response) => {
   try {
-    const { userId, otp } = req.body;
+    const userId = Number(req.body?.userId);
+    const { otp } = req.body ?? {};
+    if (!userId || !otp)
+      return genrateResponse(
+        res,
+        HttpStatus.BadRequest,
+        "userId and OTP are required",
+      );
 
-    if (!userId) {
-      return res.status(400).json({ message: "Missing UserId" });
+    const user = await findUserById(userId);
+    if (!user)
+      return genrateResponse(res, HttpStatus.BadRequest, "Invalid OTP");
+
+    const blocked = loginBlockReason(user);
+    if (blocked) return genrateResponse(res, HttpStatus.Forbidden, blocked);
+
+    const check = await verifyOtp(user.id, OtpPurpose.LOGIN, otp);
+    if (!check.ok) {
+      await recordLoginAttempt(req, user.username, user.id, false, "WRONG_OTP");
+      return genrateResponse(res, HttpStatus.BadRequest, check.message);
     }
 
-    if (!otp) {
-      return res.status(400).json({ message: "OTP is required" });
-    }
-
-    const loginAttempt = await panel.tbl_login_attempts.findFirst({
-      where: { user_id: userId },
-      orderBy: { id: "desc" },
-    });
-
-    if (!loginAttempt) {
-      return res
-        .status(400)
-        .json({ message: "No active OTP session found. Please log in again." });
-    }
-
-    const now = new Date();
-    if (!loginAttempt.otp_expires || now > loginAttempt.otp_expires) {
-      return res
-        .status(400)
-        .json({ message: "OTP expired. Please request a new one." });
-    }
-
-    const lastOTPRecord = await panel.tbl_otp_login.findFirst({
-      where: { user_id: userId },
-      orderBy: { id: "desc" },
-    });
-
-    if (!lastOTPRecord || String(lastOTPRecord.otp) !== String(otp)) {
-      return res.status(400).json({ message: "Invalid OTP" });
-    }
-
-    // Reset attempt counters + mark OTP used (prevents replay)
-    await Promise.all([
-      panel.tbl_login_attempts.update({
-        where: { id: loginAttempt.id },
-        data: {
-          isOtpVerified: true,
-          attempts: 0,
-          outside_location_attempts: 0,
-          otp_expires: null,
-        },
-      }),
-      panel.tbl_otp_login.update({
-        where: { id: lastOTPRecord.id },
-        data: { is_used: true },
-      }),
-    ]);
-
-    const user = await panel.user.findUnique({
-      where: { id: userId },
-      include: {
-        ulb_mappings: { include: { ulb: true, role: true } },
-      },
-    });
-
-    if (!user) {
-      return res.status(404).json({ message: "User not found" });
-    }
-
-    const otpRoleNames = user.ulb_mappings
-      .map((m) => (m.role as any)?.name)
-      .filter(Boolean) as string[];
-    const isPrivilegedUser = isPrivilegedUserCheck(
-      user.user_type,
-      otpRoleNames,
+    return await startSession(req, res, user, user.username);
+  } catch (err) {
+    console.error("[VerifyOTP] Error:", err);
+    return genrateResponse(
+      res,
+      HttpStatus.InternalServerError,
+      "Failed to verify OTP",
     );
-
-    const ulbs = await resolveAccessibleUlbs(
-      isPrivilegedUser,
-      user.ulb_mappings as any,
-      "id",
-    );
-
-    // Build permission set for OTP-verified session
-    const primaryUlbId = ulbs[0]?.id ?? null;
-    const permissions =
-      !isPrivilegedUser && primaryUlbId
-        ? await buildUserPermissions(user.id, primaryUlbId)
-        : [];
-
-    const zone_ward_scopes =
-      !isPrivilegedUser && primaryUlbId
-        ? await buildUserZoneWardScopes(user.id, primaryUlbId)
-        : "ALL";
-
-    const tokenPayload = {
-      userId: user.id,
-      email: user.email,
-      userType: user.user_type,
-      ulbs,
-      permissions, // ✅ MODULE:ACTION strings
-      zone_ward_scopes,
-      isPrivilegedUser,
-    };
-
-    const token = jwt.sign(tokenPayload, String(JWT_SECRET), {
-      expiresIn: "1d",
-    });
-
-    return res.status(200).json({
-      message: "OTP verified successfully",
-      login: true,
-      token,
-      user: tokenPayload,
-    });
-  } catch (err: any) {
-    console.error("OTP Verify Error:", err);
-    return res.status(500).json({
-      message: err.message || "Internal Server Error",
-    });
   }
 };
-
 
 export const resendLoginOtp = async (req: Request, res: Response) => {
   try {
-    const { userId } = req.body;
-    if (!userId) {
+    const userId = Number(req.body?.userId);
+    if (!userId)
       return genrateResponse(res, HttpStatus.BadRequest, "userId is required");
-    }
 
-    const user = await panel.user.findUnique({ where: { id: Number(userId) } });
-    if (!user || !user.phone) {
+    const user = await findUserById(userId);
+    if (!user?.phone)
       return genrateResponse(
         res,
         HttpStatus.BadRequest,
         "User not found or phone number missing",
       );
-    }
 
-    const attempt = await panel.tbl_login_attempts.findFirst({
-      where: { user_id: user.id },
-      orderBy: { id: "desc" },
+    // Resend only allowed if a login OTP was requested recently
+    const pending = await panel.otpCode.count({
+      where: {
+        user_id: user.id,
+        purpose: OtpPurpose.LOGIN,
+        created_at: { gte: new Date(Date.now() - OTP_WINDOW_MS) },
+      },
     });
-
-    if (!attempt) {
+    if (!pending)
       return genrateResponse(
         res,
         HttpStatus.BadRequest,
         "No active login session. Please try logging in again.",
       );
+
+    if (
+      await otpLimitReached(
+        user.id,
+        OtpPurpose.LOGIN,
+        OTP_WINDOW_MS,
+        OTP_MAX_PER_WINDOW,
+      )
+    ) {
+      return genrateResponse(
+        res,
+        HttpStatus.Forbidden,
+        "OTP limit reached. Please try again after 15 minutes.",
+      );
     }
 
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-
-    await panel.tbl_otp_login.create({
-      data: {
-        user_id: user.id,
-        otp,
-        msg: "Login OTP resend",
-        mobile_no: user.phone,
-      },
-    });
-
-    await panel.tbl_login_attempts.update({
-      where: { id: attempt.id },
-      data: {
-        otp_expires: new Date(Date.now() + 5 * 60 * 1000),
-        isOtpVerified: false,
-      },
-    });
-
-    sendWhatsappOtp(user.phone, "otp_services_new", [otp], "en_US").catch((e) =>
-      console.error("[ResendOTP] WhatsApp send failed:", e),
-    );
-
+    await issueOtp(req, { id: user.id, phone: user.phone }, OtpPurpose.LOGIN);
     return genrateResponse(
       res,
       HttpStatus.OK,
       "OTP resent to your registered phone.",
-      { ttlSeconds: 300 },
+      { ttlSeconds: OTP_TTL_MS / 1000 },
     );
-  } catch (err: any) {
+  } catch (err) {
     console.error("[ResendLoginOtp] Error:", err);
     return genrateResponse(
       res,
@@ -966,306 +554,287 @@ export const resendLoginOtp = async (req: Request, res: Response) => {
   }
 };
 
-// *********************************RESET PASSWORD*****************************//
-
-export const requestResetPassword = async (req: Request, res: Response) => {
+// ============================================================
+// TOKEN REFRESH (rotating refresh token + reuse detection)
+// ============================================================
+export const refreshAccessToken = async (req: Request, res: Response) => {
   try {
-    const { username } = req.body;
-
-    if (!username) {
+    const { refreshToken } = req.body ?? {};
+    if (!refreshToken)
       return genrateResponse(
         res,
         HttpStatus.BadRequest,
-        "Username is required",
+        "Refresh token is required",
       );
-    }
 
-    // Fetch user
-    const user = await panel.user.findUnique({
-      where: { username },
-      include: { employee: true },
+    const hash = sha256(String(refreshToken));
+    const session = await panel.userSession.findUnique({
+      where: { refresh_token_hash: hash },
     });
 
-    if (!user) {
-      return genrateResponse(res, HttpStatus.NotFound, "User not found");
-    }
-
-    if (!user.phone) {
-      return genrateResponse(
-        res,
-        HttpStatus.BadRequest,
-        "User contact number missing",
-      );
-    }
-
-    // Transaction to prevent race conditions bypassing the limit
-    const otp = await panel.$transaction(async (tx) => {
-      let attempt = await tx.tbl_login_attempts.findFirst({
-        where: { user_id: user.id },
-        orderBy: { id: "desc" },
+    if (!session) {
+      // Old (already rotated) token used again → treat as stolen, kill that session
+      const reused = await panel.userSession.findUnique({
+        where: { previous_token_hash: hash },
       });
-
-      if (!attempt) {
-        attempt = await tx.tbl_login_attempts.create({
+      if (reused && !reused.revoked_at) {
+        await panel.userSession.update({
+          where: { id: reused.id },
           data: {
-            user_id: user.id,
-            attempts: 0,
-            lastAttempt: new Date(),
-            otp_expires: null,
-            isOtpVerified: false,
-            otp_sent_count: 0,
-            otp_block_until: null,
+            revoked_at: new Date(),
+            revoke_reason: "REFRESH_TOKEN_REUSE",
           },
         });
-      }
-
-      // 1️ Check if user is currently blocked
-      if (attempt.otp_block_until && attempt.otp_block_until > new Date()) {
-        throw new Error(
-          `You are blocked for OTP requests until ${attempt.otp_block_until}`,
-        );
-      }
-
-      // 2️ Daily OTP Count Check (tbl_otp_login)
-      const todayStart = new Date();
-      todayStart.setHours(0, 0, 0, 0);
-
-      const todayEnd = new Date();
-      todayEnd.setHours(23, 59, 59, 999);
-
-      const otpCountToday = await tx.tbl_otp_login.count({
-        where: {
-          user_id: user.id,
-          created_at: { gte: todayStart, lte: todayEnd },
-        },
-      });
-
-      // If already 3 OTPs sent today → block 24 hours
-      if (otpCountToday >= 300) {
-        const blockUntil = new Date(Date.now() + 24 * 60 * 60 * 1000);
-        await tx.tbl_login_attempts.update({
-          where: { id: attempt.id },
-          data: { otp_block_until: blockUntil },
+        await audit(req, {
+          user_id: reused.user_id,
+          company_id: reused.active_company_id,
+          action: AuditAction.TOKEN_REUSE,
+          description: "Refresh token reuse detected, session revoked",
         });
-        throw new Error(
-          `Daily OTP limit exceeded. You are blocked until ${blockUntil}`,
-        );
       }
+      return genrateResponse(
+        res,
+        HttpStatus.Unauthorized,
+        "Invalid or expired refresh token",
+      );
+    }
 
-      // 3️ Generate OTP
-      const generatedOtp = Math.floor(
-        100000 + Math.random() * 900000,
-      ).toString();
+    if (session.revoked_at || session.expires_at < new Date()) {
+      return genrateResponse(
+        res,
+        HttpStatus.Unauthorized,
+        "Session expired. Please login again.",
+      );
+    }
 
-      // 4️ Save OTP in tbl_otp_login
-      await tx.tbl_otp_login.create({
-        data: {
-          user_id: user.id,
-          otp: generatedOtp,
-          msg: "Reset password OTP sent",
-          mobile_no: user.phone!,
-        },
+    const user = await findUserById(session.user_id);
+    if (!user || loginBlockReason(user)) {
+      await panel.userSession.update({
+        where: { id: session.id },
+        data: { revoked_at: new Date(), revoke_reason: "USER_BLOCKED" },
       });
+      return genrateResponse(
+        res,
+        HttpStatus.Unauthorized,
+        "Not authorized. Please contact your administrator.",
+      );
+    }
 
-      // 5️ Update login_attempts (expiry + flags)
-      await tx.tbl_login_attempts.update({
-        where: { id: attempt.id },
-        data: {
-          otp_expires: new Date(Date.now() + 5 * 60 * 1000),
-          isOtpVerified: false,
-        },
+    // Company may have been suspended / access removed since last login
+    let companyId = session.active_company_id;
+    if (companyId != null && !(await canAccessCompany(user, companyId)))
+      companyId = await resolveDefaultCompanyId(user);
+    if (!isSuperAdmin(user) && companyId == null) {
+      await panel.userSession.update({
+        where: { id: session.id },
+        data: { revoked_at: new Date(), revoke_reason: "NO_COMPANY_ACCESS" },
       });
+      return genrateResponse(
+        res,
+        HttpStatus.Forbidden,
+        "No active company assigned. Please contact your administrator.",
+      );
+    }
 
-      return generatedOtp;
+    const nextRefreshToken = newRefreshToken();
+    await panel.userSession.update({
+      where: { id: session.id },
+      data: {
+        refresh_token_hash: sha256(nextRefreshToken),
+        previous_token_hash: hash,
+        last_used_at: new Date(),
+        active_company_id: companyId,
+      },
     });
 
-    // 6️ Send OTP on WhatsApp
-    await sendWhatsappOtp(user.phone, "otp_services_new", [otp], "en_US");
+    const auth = await buildAuthResponse(user, session.public_id, companyId);
+    return genrateResponse(res, HttpStatus.OK, "Token refreshed successfully", {
+      ...auth,
+      refreshToken: nextRefreshToken,
+    });
+  } catch (err) {
+    console.error("[RefreshToken] Error:", err);
+    return genrateResponse(
+      res,
+      HttpStatus.InternalServerError,
+      "Internal Server Error",
+    );
+  }
+};
 
+// ============================================================
+// LOGOUT  (body.allDevices = true → logout everywhere)
+// ============================================================
+export const logoutUser = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const auth = req.user;
+    if (!auth)
+      return genrateResponse(res, HttpStatus.Unauthorized, "Not authenticated");
+
+    const allDevices = req.body?.allDevices === true;
+    const now = new Date();
+
+    if (allDevices) {
+      await panel.$transaction([
+        panel.userSession.updateMany({
+          where: { user_id: auth.userId, revoked_at: null },
+          data: { revoked_at: now, revoke_reason: "LOGOUT_ALL" },
+        }),
+        panel.user.update({
+          where: { id: auth.userId },
+          data: { token_version: { increment: 1 } },
+        }),
+      ]);
+    } else {
+      await panel.userSession.update({
+        where: { public_id: auth.sessionId },
+        data: { revoked_at: now, revoke_reason: "LOGOUT" },
+      });
+    }
+
+    await audit(req, {
+      user_id: auth.userId,
+      company_id: auth.companyId,
+      action: AuditAction.LOGOUT,
+      description: allDevices ? "Logout from all devices" : "Logout",
+    });
+    return genrateResponse(res, HttpStatus.OK, "Logged out successfully", {
+      clearToken: true,
+    });
+  } catch (err) {
+    console.error("[Logout] Error:", err);
+    return genrateResponse(
+      res,
+      HttpStatus.InternalServerError,
+      "Internal Server Error",
+    );
+  }
+};
+
+// ============================================================
+// SWITCH COMPANY
+// ============================================================
+export const switchCompany = async (
+  req: AuthenticatedRequest,
+  res: Response,
+) => {
+  try {
+    const auth = req.user;
+    if (!auth)
+      return genrateResponse(res, HttpStatus.Unauthorized, "Not authenticated");
+
+    const data = extractPayload(req.body);
+    const companyId = Number(data?.company_id);
+    if (!companyId)
+      return genrateResponse(
+        res,
+        HttpStatus.BadRequest,
+        "Valid company_id is required",
+      );
+
+    const user = await findUserById(auth.userId);
+    if (!user)
+      return genrateResponse(
+        res,
+        HttpStatus.Unauthorized,
+        "User not found or inactive",
+      );
+
+    if (!(await canAccessCompany(user, companyId))) {
+      await audit(req, {
+        user_id: user.id,
+        company_id: auth.companyId,
+        action: AuditAction.DENIED,
+        entity_type: "company",
+        entity_id: String(companyId),
+        description: "Switch company denied",
+      });
+      return genrateResponse(
+        res,
+        HttpStatus.Forbidden,
+        "You do not have access to this company",
+      );
+    }
+
+    await panel.userSession.update({
+      where: { public_id: auth.sessionId },
+      data: { active_company_id: companyId },
+    });
+
+    const result = await buildAuthResponse(user, auth.sessionId, companyId);
     return genrateResponse(
       res,
       HttpStatus.OK,
-      "OTP sent to registered WhatsApp number",
-      { otpRequired: true, userId: user.id },
+      `Switched to ${result.user.activeCompany?.name ?? "company"}`,
+      result,
     );
-  } catch (err: any) {
-    console.error("Reset Password OTP Error:", err);
+  } catch (err) {
+    console.error("[SwitchCompany] Error:", err);
     return genrateResponse(
       res,
-      HttpStatus.BadRequest,
-      err?.message || "Failed to send OTP",
+      HttpStatus.InternalServerError,
+      "Failed to switch company",
     );
   }
 };
 
-// Reset Password
-export const resetPassword = async (req: Request, res: Response) => {
-  try {
-    const { username, otp, newPassword } = req.body;
-
-    if (!username || !otp || !newPassword) {
-      return genrateResponse(
-        res,
-        HttpStatus.BadRequest,
-        "Username, OTP and new password are required",
-      );
-    }
-
-    // 1️Fetch user
-    const user = await panel.user.findUnique({
-      where: { username },
-    });
-
-    if (!user) {
-      return genrateResponse(res, HttpStatus.NotFound, "User not found");
-    }
-
-    // 2️ Fetch login_attempts row
-    const attempt = await panel.tbl_login_attempts.findFirst({
-      where: { user_id: user.id },
-      orderBy: { id: "desc" },
-    });
-
-    if (!attempt) {
-      return genrateResponse(res, HttpStatus.BadRequest, "Request OTP first");
-    }
-
-    // 3️ Check OTP expiry
-    if (!attempt.otp_expires || attempt.otp_expires < new Date()) {
-      return genrateResponse(res, HttpStatus.BadRequest, "OTP expired");
-    }
-
-    // 4️ Fetch latest OTP from tbl_otp_login
-    const otpRecord = await panel.tbl_otp_login.findFirst({
-      where: { user_id: user.id },
-      orderBy: { id: "desc" },
-    });
-
-    if (!otpRecord) {
-      return genrateResponse(
-        res,
-        HttpStatus.BadRequest,
-        "OTP not found. Request again.",
-      );
-    }
-
-    // 5️ Validate OTP
-    if (String(otpRecord.otp) !== String(otp)) {
-      return genrateResponse(res, HttpStatus.BadRequest, "Invalid OTP");
-    }
-
-    // 6️ Hash new password
-    const hashedPassword = await bcrypt.hash(newPassword, 10);
-
-    await panel.user.update({
-      where: { id: user.id },
-      data: { password: hashedPassword },
-    });
-
-    // 7️ Clear OTP + reset counters
-    await panel.tbl_login_attempts.update({
-      where: { id: attempt.id },
-      data: {
-        otp_expires: null,
-        isOtpVerified: true,
-        attempts: 0,
-        otp_sent_count: 0,
-        otp_block_until: null,
-      },
-    });
-
-    // io.to("admins").emit("password_reset", {
-    //     userId: user.id,
-    //     username: user.username,
-    //     message: `User ${user.username} has reset their password`,
-    //     time: new Date()
-    // });
-
-    // 8) Real-time notification to the effected user (toast-style)
-    // try {
-    //     socketService.emitNotification(String(user.id), {
-    //         title: "Password changed",
-    //         message: "Your password was successfully changed. If this wasn't you, contact support immediately.",
-    //         type: "warning",
-    //         data: { action: "password_reset" },
-    //     });
-    // } catch (notifyErr) {
-    //     console.warn("Failed to emit password-change notification to user:", notifyErr);
-    // }
-
-    // 9) Optional admin notification (non-blocking)
-    try {
-      // @ts-ignore - optional call if socketService implements emitToRoom
-      if (typeof (socketService as any).emitToRoom === "function") {
-        // send a concise admin-facing message
-        (socketService as any).emitToRoom("admins", {
-          title: "User password reset",
-          message: `User ${user.username} (id: ${user.id}) reset their password.`,
-          type: "info",
-          data: { userId: user.id },
-        });
-      }
-    } catch (adminNotifyErr) {
-      console.warn("Admin notification failed (non-fatal):", adminNotifyErr);
-    }
-
-    return genrateResponse(res, HttpStatus.OK, "Password reset successful");
-  } catch (err: any) {
-    console.error("Reset Password Error:", err);
-    return genrateResponse(
-      res,
-      HttpStatus.BadRequest,
-      err?.message || "Failed",
-    );
-  }
-};
-
-
+// ============================================================
+// PROFILE
+// ============================================================
 export const getMe = async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const userId = req.user?.userId;
-
-    if (!userId) {
+    const auth = req.user;
+    if (!auth)
       return genrateResponse(res, HttpStatus.Unauthorized, "Unauthorized");
-    }
 
     const user = await panel.user.findUnique({
-      where: { id: userId },
+      where: { id: auth.userId },
       include: {
-        employee: {
-          include: {
-            agency: true,
-            module: true,
+        platform_role: { select: { code: true, name: true } },
+        home_company: { select: { id: true, code: true, name: true } },
+        memberships: {
+          where: { is_active: true },
+          select: {
+            id: true,
+            employee_code: true,
+            designation: true,
+            department: true,
+            is_default: true,
+            company: { select: { id: true, code: true, name: true } },
+            roles: { select: { role: { select: { code: true, name: true } } } },
           },
-        },
-        ulb_mappings: {
-          include: {
-            ulb: true,
-            role: true,
-          },
-        },
-        zone_ward_scopes: {
-          include: { zone: true, ward: true },
         },
       },
     });
-
-    if (!user) {
+    if (!user)
       return genrateResponse(res, HttpStatus.NotFound, "User not found");
-    }
 
-    // Strip password
-    const { password, ...userWithoutPassword } = user;
+    const {
+      password_hash,
+      failed_login_count,
+      locked_until,
+      token_version,
+      ...profile
+    } = user;
 
-    const encrypted = encryptData(userWithoutPassword);
     return genrateResponse(
       res,
       HttpStatus.OK,
       "Profile fetched successfully",
-      encrypted,
+      encryptData({
+        ...profile,
+        access: {
+          activeCompanyId: auth.companyId,
+          isSuperAdmin: auth.isSuperAdmin,
+          roles: auth.roles,
+          dataScope: auth.dataScope,
+          permissions: auth.permissions,
+          menus: auth.menus,
+        },
+      }),
     );
-  } catch (err: any) {
-    console.error("GetMe Error:", err);
+  } catch (err) {
+    console.error("[GetMe] Error:", err);
     return genrateResponse(
       res,
       HttpStatus.InternalServerError,
@@ -1274,87 +843,198 @@ export const getMe = async (req: AuthenticatedRequest, res: Response) => {
   }
 };
 
-/**
- * Request OTP for password change (Authenticated)
- */
+// ============================================================
+// FORGOT / RESET PASSWORD (not logged in)
+// ============================================================
+export const requestResetPassword = async (req: Request, res: Response) => {
+  const genericReply = () =>
+    genrateResponse(
+      res,
+      HttpStatus.OK,
+      "If the account exists, an OTP has been sent to the registered WhatsApp number",
+      {
+        otpRequired: true,
+        ttlSeconds: OTP_TTL_MS / 1000,
+      },
+    );
+
+  try {
+    const { username } = req.body ?? {};
+    if (!username)
+      return genrateResponse(
+        res,
+        HttpStatus.BadRequest,
+        "Username is required",
+      );
+
+    const user = await findUserByIdentifier(String(username));
+    if (!user?.phone || loginBlockReason(user)) return genericReply(); // never reveal whether the user exists
+
+    if (
+      (await otpLimitReached(
+        user.id,
+        OtpPurpose.PASSWORD_RESET,
+        24 * 60 * 60 * 1000,
+        RESET_MAX_PER_DAY,
+      )) ||
+      (await otpLimitReached(
+        user.id,
+        OtpPurpose.PASSWORD_RESET,
+        OTP_WINDOW_MS,
+        OTP_MAX_PER_WINDOW,
+      ))
+    ) {
+      return genrateResponse(
+        res,
+        HttpStatus.Forbidden,
+        "OTP limit reached. Please try again later.",
+      );
+    }
+
+    await issueOtp(
+      req,
+      { id: user.id, phone: user.phone },
+      OtpPurpose.PASSWORD_RESET,
+    );
+    return genericReply();
+  } catch (err) {
+    console.error("[RequestResetPassword] Error:", err);
+    return genrateResponse(
+      res,
+      HttpStatus.InternalServerError,
+      "Failed to send OTP",
+    );
+  }
+};
+
+export const resetPassword = async (req: Request, res: Response) => {
+  try {
+    const { username, otp, newPassword } = req.body ?? {};
+    if (!username || !otp || !newPassword) {
+      return genrateResponse(
+        res,
+        HttpStatus.BadRequest,
+        "Username, OTP and new password are required",
+      );
+    }
+
+    const invalid = passwordError(newPassword);
+    if (invalid) return genrateResponse(res, HttpStatus.BadRequest, invalid);
+
+    const user = await findUserByIdentifier(String(username));
+    if (!user)
+      return genrateResponse(res, HttpStatus.BadRequest, "Invalid OTP");
+
+    const check = await verifyOtp(user.id, OtpPurpose.PASSWORD_RESET, otp);
+    if (!check.ok)
+      return genrateResponse(res, HttpStatus.BadRequest, check.message);
+
+    const now = new Date();
+    await panel.$transaction([
+      panel.user.update({
+        where: { id: user.id },
+        data: {
+          password_hash: await bcrypt.hash(newPassword, BCRYPT_ROUNDS),
+          password_changed_at: now,
+          must_change_password: false,
+          failed_login_count: 0,
+          locked_until: null,
+          token_version: { increment: 1 },
+        },
+      }),
+      panel.userSession.updateMany({
+        where: { user_id: user.id, revoked_at: null },
+        data: { revoked_at: now, revoke_reason: "PASSWORD_RESET" },
+      }),
+    ]);
+
+    await audit(req, {
+      user_id: user.id,
+      action: AuditAction.PASSWORD_CHANGE,
+      description: "Password reset via OTP",
+    });
+    return genrateResponse(
+      res,
+      HttpStatus.OK,
+      "Password reset successful. Please login with your new password.",
+    );
+  } catch (err) {
+    console.error("[ResetPassword] Error:", err);
+    return genrateResponse(
+      res,
+      HttpStatus.InternalServerError,
+      "Failed to reset password",
+    );
+  }
+};
+
+// ============================================================
+// CHANGE PASSWORD (logged in)
+// ============================================================
 export const requestChangePasswordOTP = async (
   req: AuthenticatedRequest,
   res: Response,
 ) => {
   try {
-    const userId = req.user?.userId;
-
-    if (!userId) {
+    const auth = req.user;
+    if (!auth)
       return genrateResponse(res, HttpStatus.Unauthorized, "Unauthorized");
-    }
 
     const user = await panel.user.findUnique({
-      where: { id: userId },
+      where: { id: auth.userId },
+      select: { id: true, phone: true },
     });
-
-    if (!user || !user.phone) {
+    if (!user?.phone)
       return genrateResponse(
         res,
         HttpStatus.BadRequest,
         "User phone number not found",
       );
+
+    if (
+      await otpLimitReached(
+        user.id,
+        OtpPurpose.PASSWORD_RESET,
+        OTP_WINDOW_MS,
+        OTP_MAX_PER_WINDOW,
+      )
+    ) {
+      return genrateResponse(
+        res,
+        HttpStatus.Forbidden,
+        "OTP limit reached. Please try again after 15 minutes.",
+      );
     }
 
-    // Reuse OTP logic from requestResetPassword
-    let attempt = await panel.tbl_login_attempts.findFirst({
-      where: { user_id: user.id },
-      orderBy: { id: "desc" },
+    await issueOtp(
+      req,
+      { id: user.id, phone: user.phone },
+      OtpPurpose.PASSWORD_RESET,
+    );
+    return genrateResponse(res, HttpStatus.OK, "OTP sent successfully", {
+      ttlSeconds: OTP_TTL_MS / 1000,
     });
-
-    if (!attempt) {
-      attempt = await panel.tbl_login_attempts.create({
-        data: { user_id: user.id, lastAttempt: new Date() },
-      });
-    }
-
-    // Generate OTP
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-
-    await panel.tbl_otp_login.create({
-      data: {
-        user_id: user.id,
-        otp,
-        msg: "Change password OTP",
-        mobile_no: user.phone,
-      },
-    });
-
-    await panel.tbl_login_attempts.update({
-      where: { id: attempt.id },
-      data: {
-        otp_expires: new Date(Date.now() + 5 * 60 * 1000),
-        isOtpVerified: false,
-      },
-    });
-
-    // Send OTP
-    await sendWhatsappOtp(user.phone, "otp_services_new", [otp], "en_US");
-
-    return genrateResponse(res, HttpStatus.OK, "OTP sent successfully");
-  } catch (err: any) {
-    console.error("RequestChangePasswordOTP Error:", err);
-    return genrateResponse(res, HttpStatus.BadRequest, "Failed to send OTP");
+  } catch (err) {
+    console.error("[RequestChangePasswordOTP] Error:", err);
+    return genrateResponse(
+      res,
+      HttpStatus.InternalServerError,
+      "Failed to send OTP",
+    );
   }
 };
 
-/**
- * Verify OTP and Update Password (Authenticated)
- */
+/** Changes password and logs out all OTHER devices; current session stays active. */
 export const verifyChangePassword = async (
   req: AuthenticatedRequest,
   res: Response,
 ) => {
   try {
-    const userId = req.user?.userId;
-    const { otp, newPassword } = req.body;
-
-    if (!userId)
+    const auth = req.user;
+    if (!auth)
       return genrateResponse(res, HttpStatus.Unauthorized, "Unauthorized");
+
+    const { otp, newPassword } = req.body ?? {};
     if (!otp || !newPassword)
       return genrateResponse(
         res,
@@ -1362,46 +1042,42 @@ export const verifyChangePassword = async (
         "OTP and new password required",
       );
 
-    const otpRecord = await panel.tbl_otp_login.findFirst({
-      where: { user_id: userId, is_used: false },
-      orderBy: { id: "desc" },
+    const invalid = passwordError(newPassword);
+    if (invalid) return genrateResponse(res, HttpStatus.BadRequest, invalid);
+
+    const check = await verifyOtp(auth.userId, OtpPurpose.PASSWORD_RESET, otp);
+    if (!check.ok)
+      return genrateResponse(res, HttpStatus.BadRequest, check.message);
+
+    const now = new Date();
+    await panel.$transaction([
+      panel.user.update({
+        where: { id: auth.userId },
+        data: {
+          password_hash: await bcrypt.hash(newPassword, BCRYPT_ROUNDS),
+          password_changed_at: now,
+          must_change_password: false,
+        },
+      }),
+      panel.userSession.updateMany({
+        where: {
+          user_id: auth.userId,
+          revoked_at: null,
+          NOT: { public_id: auth.sessionId },
+        },
+        data: { revoked_at: now, revoke_reason: "PASSWORD_CHANGE" },
+      }),
+    ]);
+
+    await audit(req, {
+      user_id: auth.userId,
+      company_id: auth.companyId,
+      action: AuditAction.PASSWORD_CHANGE,
+      description: "Password changed via OTP",
     });
-
-    if (!otpRecord || otpRecord.otp !== String(otp)) {
-      return genrateResponse(res, HttpStatus.BadRequest, "Invalid OTP");
-    }
-
-    const attempt = await panel.tbl_login_attempts.findFirst({
-      where: { user_id: userId },
-      orderBy: { id: "desc" },
-    });
-
-    if (!attempt || !attempt.otp_expires || attempt.otp_expires < new Date()) {
-      return genrateResponse(res, HttpStatus.BadRequest, "OTP expired");
-    }
-
-    // Update Password
-    const hashedPassword = await bcrypt.hash(newPassword, 10);
-    await panel.user.update({
-      where: { id: userId },
-      data: { password: hashedPassword },
-    });
-
-    // Mark OTP as used
-    await panel.tbl_otp_login.update({
-      where: { id: otpRecord.id },
-      data: { is_used: true },
-    });
-
-    // Reset attempts
-    await panel.tbl_login_attempts.update({
-      where: { id: attempt.id },
-      data: { isOtpVerified: true, otp_expires: null },
-    });
-
     return genrateResponse(res, HttpStatus.OK, "Password updated successfully");
-  } catch (err: any) {
-    console.error("VerifyChangePassword Error:", err);
+  } catch (err) {
+    console.error("[VerifyChangePassword] Error:", err);
     return genrateResponse(
       res,
       HttpStatus.InternalServerError,
@@ -1409,43 +1085,3 @@ export const verifyChangePassword = async (
     );
   }
 };
-
-
-// ********************Blocking Functioanlity******************** //
-// helper: create block record in tbl_property_block and update login_attempts
-export async function createBlockEntry(userId: number | null, reason: string, req: Request, durationHours = 24) {
-  const from = new Date();
-  const to = new Date(Date.now() + durationHours * 60 * 60 * 1000);
-
-  const ip =
-    (req.headers["x-forwarded-for"] as string | undefined)?.split(",")[0] ||
-    req.socket.remoteAddress ||
-    "UNKNOWN";
-
-  await panel.tbl_property_block.create({
-    data: {
-      user_id: userId,
-      reason,
-      from_block: from,
-      to_block: to,
-      ip_address: ip,
-      recstatus: 1
-    }
-  });
-
-  // return to for message
-  return { from, to };
-}
-
-export async function isUserBlockedInPropertyBlock(userId: number) {
-  const now = new Date();
-  const block = await panel.tbl_property_block.findFirst({
-    where: {
-      user_id: userId,
-      to_block: { gte: now },
-      recstatus: 1
-    },
-    orderBy: { created_at: "desc" }
-  });
-  return block;
-}
